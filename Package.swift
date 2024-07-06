@@ -20,7 +20,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/saamerm/swift-transformers-ios15.git", exact: "0.1.8"),
+        .package(url: "https://github.com/saamerm/swift-transformers-ios15.git", exact: "0.1.9"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", exact: "1.3.0"),
     ],
     targets: [
