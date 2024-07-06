@@ -20,14 +20,14 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/saamerm/swift-transformers-ios15.git", exact: "0.1.7"),
+        .package(url: "https://github.com/saamerm/swift-transformers-ios15.git", exact: "0.1.8"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", exact: "1.3.0"),
     ],
     targets: [
         .target(
             name: "WhisperKit",
             dependencies: [
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Transformers", package: "swift-transformers-ios15"),
             ]
         ),
         .executableTarget(
@@ -41,7 +41,7 @@ let package = Package(
             name: "WhisperKitTests",
             dependencies: [
                 "WhisperKit",
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Transformers", package: "swift-transformers-ios15"),
             ],
             path: ".",
             exclude: [
