@@ -72,7 +72,7 @@ func XCTAssertNoThrowAsync(
 
 // MARK: Helpers
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 extension MLMultiArray {
     /// Create `MLMultiArray` of shape [1, 1, arr.count] and fill up the last
     /// dimension with with values from arr.
@@ -100,7 +100,7 @@ extension MLMultiArray {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 extension XCTestCase {
     func transcribe(
         with variant: ModelVariant,

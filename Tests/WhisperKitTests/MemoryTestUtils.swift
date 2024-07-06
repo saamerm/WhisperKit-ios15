@@ -154,7 +154,7 @@ extension Data {
 
 // MARK: - SystemMemoryChecker
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 class SystemMemoryChecker: NSObject {
     static func getMemoryUsed() -> UInt64 {
         // The `TASK_VM_INFO_COUNT` and `TASK_VM_INFO_REV1_COUNT` macros are too

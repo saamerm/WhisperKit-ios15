@@ -138,7 +138,7 @@ public extension Process {
 }
 #endif
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public extension WhisperKit {
     static var isRunningOnSimulator: Bool {
         #if targetEnvironment(simulator)
@@ -183,7 +183,7 @@ extension String {
 
 // MARK: - Helpers
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 func prepareSeekClips(contentFrames: Int, decodeOptions: DecodingOptions?) -> [(start: Int, end: Int)] {
     let options = decodeOptions ?? DecodingOptions()
     var seekPoints: [Int] = options.clipTimestamps.map { Int(round($0 * Float(WhisperKit.sampleRate))) }
@@ -205,7 +205,7 @@ func prepareSeekClips(contentFrames: Int, decodeOptions: DecodingOptions?) -> [(
     return seekClips
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 func initMLMultiArray(shape: [NSNumber], dataType: MLMultiArrayDataType, initialValue: Any) -> MLMultiArray {
     var multiArray: MLMultiArray
     switch dataType {
@@ -504,7 +504,7 @@ public func findLongestDifferentSuffix(_ words1: [WordTiming], _ words2: [WordTi
     return Array(remainingWords)
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public func mergeTranscriptionResults(_ results: [TranscriptionResult?], confirmedWords: [WordTiming]? = nil) -> TranscriptionResult {
     var mergedText = ""
     if let words = confirmedWords {
@@ -585,7 +585,7 @@ public func mergeTranscriptionResults(_ results: [TranscriptionResult?], confirm
     )
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public func updateSegmentTimings(segment: TranscriptionSegment, seekTime: Float) -> TranscriptionSegment {
     var updatedSegment = segment
     let seekOffsetIndex = Int(seekTime * Float(WhisperKit.sampleRate))

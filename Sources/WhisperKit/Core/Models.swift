@@ -131,7 +131,7 @@ public enum ModelState: CustomStringConvertible {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public struct ModelComputeOptions {
     public var melCompute: MLComputeUnits
     public var audioEncoderCompute: MLComputeUnits
@@ -264,7 +264,7 @@ public enum ChunkingStrategy: String, CaseIterable {
 ///   - firstTokenLogProbThreshold: If the log probability over the first sampled token is below this value, treat as failed.
 ///   - noSpeechThreshold: If the no speech probability is higher than this value AND the average log
 ///                        probability over sampled tokens is below `logProbThreshold`, consider the segment as silent.
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public struct DecodingOptions {
     public var verbose: Bool
     public var task: DecodingTask
@@ -350,7 +350,7 @@ public struct DecodingOptions {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public struct DecodingFallback {
     public var needsFallback: Bool
     public var fallbackReason: String
@@ -361,7 +361,7 @@ public struct DecodingFallback {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public extension DecodingFallback {
     init?(
         options: DecodingOptions,
@@ -388,7 +388,7 @@ public extension DecodingFallback {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public struct DecodingResult {
     public var language: String
     public var languageProbs: [String: Float]
@@ -731,7 +731,7 @@ public class MelSpectrogramInput: MLFeatureProvider {
 }
 
 /// Model Prediction Output Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class MelSpectrogramOutput: MLFeatureProvider {
     /// Source provided by CoreML
     private let provider: MLFeatureProvider
@@ -768,7 +768,7 @@ public class MelSpectrogramOutput: MLFeatureProvider {
 // MARK: AudioEncoder
 
 /// Model Prediction Input Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class AudioEncoderInput: MLFeatureProvider {
     /// melspectrogram_features as 1 × {80,128} × 1 × 3000 4-dimensional array of floats
     public var melspectrogram_features: MLMultiArray
@@ -794,7 +794,7 @@ public class AudioEncoderInput: MLFeatureProvider {
 }
 
 /// Model Prediction Output Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class AudioEncoderOutput: MLFeatureProvider {
     /// Source provided by CoreML
     private let provider: MLFeatureProvider
@@ -831,7 +831,7 @@ public class AudioEncoderOutput: MLFeatureProvider {
 // MARK: TextDecoder
 
 /// Model Prediction Input Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class TextDecoderInput: MLFeatureProvider {
     /// input_ids as 1 element vector of 32-bit integers
     public var input_ids: MLMultiArray
@@ -899,7 +899,7 @@ public class TextDecoderInput: MLFeatureProvider {
 }
 
 /// Model Prediction Output Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class TextDecoderOutput: MLFeatureProvider {
     /// Source provided by CoreML
     private let provider: MLFeatureProvider
@@ -1006,7 +1006,7 @@ public class TextDecoderCachePrefillInput: MLFeatureProvider {
 }
 
 /// Model Prediction Output Type
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public class TextDecoderCachePrefillOutput: MLFeatureProvider {
     /// Source provided by CoreML
     private let provider: MLFeatureProvider

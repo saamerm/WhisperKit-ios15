@@ -10,7 +10,7 @@ public protocol LogitsFiltering {
     func filterLogits(_ logits: MLMultiArray, withTokens tokens: [Int]) -> MLMultiArray
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 open class SuppressTokensFilter: LogitsFiltering {
     let suppressTokens: [Int]
     private let suppressTokenIndexes: [[NSNumber]]
@@ -26,7 +26,7 @@ open class SuppressTokensFilter: LogitsFiltering {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 open class SuppressBlankFilter: LogitsFiltering {
     let specialTokens: SpecialTokens
     let sampleBegin: Int
@@ -54,7 +54,7 @@ open class SuppressBlankFilter: LogitsFiltering {
 }
 
 /// Implementation based on https://github.com/openai/whisper/blob/master/whisper/decoding.py#L441
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 open class TimestampRulesFilter: LogitsFiltering {
     let specialTokens: SpecialTokens
     let sampleBegin: Int
@@ -245,7 +245,7 @@ open class TimestampRulesFilter: LogitsFiltering {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 open class LanguageLogitsFilter: LogitsFiltering {
     let allLanguageTokens: Set<Int>
     let logitsDim: Int
