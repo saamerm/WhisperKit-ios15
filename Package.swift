@@ -27,7 +27,7 @@ let package = Package(
         .target(
             name: "WhisperKit",
             dependencies: [
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Transformers", package: "swift-transformers-ios15"),
             ]
         ),
         .executableTarget(
@@ -41,7 +41,7 @@ let package = Package(
             name: "WhisperKitTests",
             dependencies: [
                 "WhisperKit",
-                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Transformers", package: "swift-transformers-ios15"),
             ],
             path: ".",
             exclude: [
