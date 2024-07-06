@@ -441,18 +441,18 @@ open class SegmentSeeker: SegmentSeeking {
         }
 
         let filteredAlignmentWeights = initMLMultiArray(shape: [filteredIndices.count, columnCount] as [NSNumber], dataType: alignmentWeights.dataType, initialValue: FloatType(0))
+        if #available(iOS 16.0, *) {
+            alignmentWeights.withUnsafeMutableBytes { weightsPointer, weightsStride in
+                filteredAlignmentWeights.withUnsafeMutableBytes { filteredWeightsPointer, filteredWeightsStride in
+                    for (newIndex, originalIndex) in filteredIndices.enumerated() {
+                        let sourcePointer = weightsPointer.baseAddress!.advanced(by: Int(originalIndex * columnCount * MemoryLayout<FloatType>.stride))
+                        let destinationPointer = filteredWeightsPointer.baseAddress!.advanced(by: Int(newIndex * columnCount * MemoryLayout<FloatType>.stride))
 
-        alignmentWeights.withUnsafeMutableBytes { weightsPointer, weightsStride in
-            filteredAlignmentWeights.withUnsafeMutableBytes { filteredWeightsPointer, filteredWeightsStride in
-                for (newIndex, originalIndex) in filteredIndices.enumerated() {
-                    let sourcePointer = weightsPointer.baseAddress!.advanced(by: Int(originalIndex * columnCount * MemoryLayout<FloatType>.stride))
-                    let destinationPointer = filteredWeightsPointer.baseAddress!.advanced(by: Int(newIndex * columnCount * MemoryLayout<FloatType>.stride))
-
-                    memcpy(destinationPointer, sourcePointer, columnCount * MemoryLayout<FloatType>.stride)
+                        memcpy(destinationPointer, sourcePointer, columnCount * MemoryLayout<FloatType>.stride)
+                    }
                 }
             }
         }
-
         Logging.debug("Alignment weights shape: \(filteredAlignmentWeights.shape)")
 
         var alignment = try findAlignment(

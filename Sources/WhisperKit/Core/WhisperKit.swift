@@ -202,9 +202,13 @@ open class WhisperKit {
                     callback(progress)
                 }
             }
-
-            let modelFolderName = modelFolder.appending(path: variantPath)
-            return modelFolderName
+            if #available(iOS 16.0, *){
+                let modelFolderName = modelFolder.appending(path: variantPath)
+                return modelFolderName
+            } else {
+                let modelFolderName = modelFolder.appendingPathComponent(variantPath)
+                return modelFolderName
+            }
         } catch {
             Logging.debug(error)
             throw error
@@ -261,10 +265,20 @@ open class WhisperKit {
 
         Logging.debug("Loading models from \(path.path) with prewarmMode: \(prewarmMode)")
 
-        let logmelUrl = path.appending(path: "MelSpectrogram.mlmodelc")
-        let encoderUrl = path.appending(path: "AudioEncoder.mlmodelc")
-        let decoderUrl = path.appending(path: "TextDecoder.mlmodelc")
-        let decoderPrefillUrl = path.appending(path: "TextDecoderContextPrefill.mlmodelc")
+        let logmelUrl: URL
+        let encoderUrl: URL
+        let decoderUrl: URL
+        let decoderPrefillUrl: URL
+        if #available(iOS 16.0, *){
+            logmelUrl = path.appending(path: "MelSpectrogram.mlmodelc")
+            encoderUrl = path.appending(path: "AudioEncoder.mlmodelc")
+            decoderUrl = path.appending(path: "TextDecoder.mlmodelc")
+            decoderPrefillUrl = path.appending(path: "TextDecoderContextPrefill.mlmodelc")
+        } else {
+            logmelUrl = path.appendingPathComponent("MelSpectrogram.mlmodelc")
+            encoderUrl = path.appendingPathComponent("AudioEncoder.mlmodelc")
+            decoderUrl = path.appendingPathComponent("TextDecoder.mlmodelc")
+            decoderPrefillUrl = path.appendingPathComponent("TextDecoderContextPrefill.mlmodelc")        }
 
         for item in [logmelUrl, encoderUrl, decoderUrl] {
             if !FileManager.default.fileExists(atPath: item.path) {
@@ -497,11 +511,15 @@ open class WhisperKit {
             switch audioResult {
                 case .success:
                     // Append transcription result if audio loading was successful (may still contain failure)
-                    result.append(transcribeResults[transcribeResultIndex])
+                    if #available(iOS 16.0, *){
+                        result.append(transcribeResults[transcribeResultIndex])
+                    }
                     transcribeResultIndex += 1
                 case let .failure(error):
                     // Append failure result if audio loading failed
-                    result.append(.failure(error))
+                    if #available(iOS 16.0, *){
+                        result.append(.failure(error))
+                    }                    
             }
         }
 

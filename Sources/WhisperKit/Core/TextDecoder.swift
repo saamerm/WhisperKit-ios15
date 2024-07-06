@@ -142,31 +142,56 @@ public extension TextDecoding {
         let kvCacheEmbedDimValue = NSNumber(value: kvCacheEmbedDim)
         let kvCacheMaxSequenceLengthValue = NSNumber(value: kvCacheMaxSequenceLength)
         let encoderOutputDimValue = NSNumber(value: encoderOutputDim)
-
+        let kvCacheUpdateMask = initMLMultiArray(shape: [1, kvCacheMaxSequenceLengthValue], dataType: .int32, initialValue: Int32(0))
         let inputIds = initMLMultiArray(shape: [1], dataType: .int32, initialValue: Int32(0))
         let cacheLength = initMLMultiArray(shape: [1], dataType: .int32, initialValue: Int32(0))
-        let keyCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(0))
-        let valueCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(0))
-        let alignmentWeights = initMLMultiArray(shape: [kvCacheMaxSequenceLengthValue, encoderOutputDimValue], dataType: .float16, initialValue: FloatType(0))
-        let kvCacheUpdateMask = initMLMultiArray(shape: [1, kvCacheMaxSequenceLengthValue], dataType: .int32, initialValue: Int32(0))
-        let decoderKeyPaddingMask = initMLMultiArray(shape: [1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(-10000))
-        let prefillKeyCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16)
-        let prefillValueCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16)
+        if #available(iOS 16.0, *){
+            let keyCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(0))
+            let valueCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(0))
+            let alignmentWeights = initMLMultiArray(shape: [kvCacheMaxSequenceLengthValue, encoderOutputDimValue], dataType: .float16, initialValue: FloatType(0))
+            let decoderKeyPaddingMask = initMLMultiArray(shape: [1, kvCacheMaxSequenceLengthValue], dataType: .float16, initialValue: FloatType(-10000))
+            let prefillKeyCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16)
+            let prefillValueCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .float16)
 
-        let decoderInputs = DecodingInputs(
-            initialPrompt: initialPrompt,
-            inputIds: inputIds,
-            cacheLength: cacheLength,
-            keyCache: keyCache,
-            valueCache: valueCache,
-            alignmentWeights: alignmentWeights,
-            kvCacheUpdateMask: kvCacheUpdateMask,
-            decoderKeyPaddingMask: decoderKeyPaddingMask,
-            prefillKeyCache: prefillKeyCache,
-            prefillValueCache: prefillValueCache
-        )
+            let decoderInputs = DecodingInputs(
+                initialPrompt: initialPrompt,
+                inputIds: inputIds,
+                cacheLength: cacheLength,
+                keyCache: keyCache,
+                valueCache: valueCache,
+                alignmentWeights: alignmentWeights,
+                kvCacheUpdateMask: kvCacheUpdateMask,
+                decoderKeyPaddingMask: decoderKeyPaddingMask,
+                prefillKeyCache: prefillKeyCache,
+                prefillValueCache: prefillValueCache
+            )
 
-        return decoderInputs
+            return decoderInputs
+        } else {
+            let keyCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .int32, initialValue: FloatType(0))
+            let valueCache = initMLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .int32, initialValue: FloatType(0))
+            let alignmentWeights = initMLMultiArray(shape: [kvCacheMaxSequenceLengthValue, encoderOutputDimValue], dataType: .int32, initialValue: FloatType(0))
+            let decoderKeyPaddingMask = initMLMultiArray(shape: [1, kvCacheMaxSequenceLengthValue], dataType: .int32, initialValue: FloatType(-10000))
+            let prefillKeyCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .int32)
+            let prefillValueCache = try! MLMultiArray(shape: [1, kvCacheEmbedDimValue, 1, kvCacheMaxSequenceLengthValue], dataType: .int32)
+
+            let decoderInputs = DecodingInputs(
+                initialPrompt: initialPrompt,
+                inputIds: inputIds,
+                cacheLength: cacheLength,
+                keyCache: keyCache,
+                valueCache: valueCache,
+                alignmentWeights: alignmentWeights,
+                kvCacheUpdateMask: kvCacheUpdateMask,
+                decoderKeyPaddingMask: decoderKeyPaddingMask,
+                prefillKeyCache: prefillKeyCache,
+                prefillValueCache: prefillValueCache
+            )
+
+            return decoderInputs
+        }
+
+
     }
 
     func prefillDecoderInputs(_ decoderInputs: DecodingInputs, withOptions options: DecodingOptions?) async throws -> DecodingInputs {
@@ -278,30 +303,33 @@ public extension TextDecoding {
         let sliceShape = keySlice.shape.map { $0.intValue }
         let sliceStrides = keySlice.strides.map { $0.intValue } // same for val
         let bytesPerSample = MemoryLayout<FloatType>.size
+        if #unavailable (iOS 16.0){
+            return
+        } else {
+            keyTensor.withUnsafeMutableBytes { keyTensorPointer, keyTargetStrides in
+                keySlice.withUnsafeBytes { keySlicePointer in
+                    valueTensor.withUnsafeMutableBytes { valueTensorPointer, valueTargetStrides in
+                        valueSlice.withUnsafeBytes { valueSlicePointer in
+                            // Assuming batch size is always 1
+                            DispatchQueue.concurrentPerform(iterations: tensorShape[1]) { j in
+                                // Slice size is 3 for prefill and 1 for decode loops
+                                for k in 0..<sliceShape[3] {
+                                    // Equivalent to:
+                                    // `tensor[0, j, 0, k + index] = slice[0, j, 0, k + index]`
+                                    let keyDestIndex = j * keyTargetStrides[1] + (index + k) * keyTargetStrides[3]
+                                    let keyDest = keyTensorPointer.baseAddress! + keyDestIndex * bytesPerSample
 
-        keyTensor.withUnsafeMutableBytes { keyTensorPointer, keyTargetStrides in
-            keySlice.withUnsafeBytes { keySlicePointer in
-                valueTensor.withUnsafeMutableBytes { valueTensorPointer, valueTargetStrides in
-                    valueSlice.withUnsafeBytes { valueSlicePointer in
-                        // Assuming batch size is always 1
-                        DispatchQueue.concurrentPerform(iterations: tensorShape[1]) { j in
-                            // Slice size is 3 for prefill and 1 for decode loops
-                            for k in 0..<sliceShape[3] {
-                                // Equivalent to:
-                                // `tensor[0, j, 0, k + index] = slice[0, j, 0, k + index]`
-                                let keyDestIndex = j * keyTargetStrides[1] + (index + k) * keyTargetStrides[3]
-                                let keyDest = keyTensorPointer.baseAddress! + keyDestIndex * bytesPerSample
+                                    let keySliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
+                                    let keySlice = keySlicePointer.baseAddress! + keySliceIndex * bytesPerSample
+                                    memcpy(keyDest, keySlice, bytesPerSample)
 
-                                let keySliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
-                                let keySlice = keySlicePointer.baseAddress! + keySliceIndex * bytesPerSample
-                                memcpy(keyDest, keySlice, bytesPerSample)
+                                    let valDestIndex = j * valueTargetStrides[1] + (index + k) * valueTargetStrides[3]
+                                    let valDest = valueTensorPointer.baseAddress! + valDestIndex * bytesPerSample
 
-                                let valDestIndex = j * valueTargetStrides[1] + (index + k) * valueTargetStrides[3]
-                                let valDest = valueTensorPointer.baseAddress! + valDestIndex * bytesPerSample
-
-                                let valSliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
-                                let valSlice = valueSlicePointer.baseAddress! + valSliceIndex * bytesPerSample
-                                memcpy(valDest, valSlice, bytesPerSample)
+                                    let valSliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
+                                    let valSlice = valueSlicePointer.baseAddress! + valSliceIndex * bytesPerSample
+                                    memcpy(valDest, valSlice, bytesPerSample)
+                                }
                             }
                         }
                     }

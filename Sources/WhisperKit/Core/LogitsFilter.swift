@@ -197,12 +197,14 @@ open class TimestampRulesFilter: LogitsFiltering {
             )
             defer { timestampLogProb.deallocate() }
 
-            try BNNS.applyReduction(
-                .logSumExp,
-                input: logSumExpInputDescriptor,
-                output: timestampLogProb,
-                weights: nil
-            )
+            if #available(iOS 16.0, *){
+                try BNNS.applyReduction(
+                    .logSumExp,
+                    input: logSumExpInputDescriptor,
+                    output: timestampLogProb,
+                    weights: nil
+                )
+            }
 
             let maxTextTokenLogProbInputPointer = UnsafeMutableRawBufferPointer(
                 start: logprobs.data,

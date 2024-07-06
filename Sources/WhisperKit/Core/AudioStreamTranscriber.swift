@@ -178,8 +178,10 @@ public actor AudioStreamTranscriber {
                 state.lastConfirmedSegmentEndSeconds = lastConfirmedSegment.end
 
                 // Add confirmed segments to the confirmedSegments array
-                if !state.confirmedSegments.contains(confirmedSegmentsArray) {
-                    state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
+                if #available(iOS 16.0, *){
+                    if !state.confirmedSegments.contains(confirmedSegmentsArray) {
+                        state.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
+                    }
                 }
             }
 

@@ -141,7 +141,7 @@ public struct ModelComputeOptions {
     public init(
         melCompute: MLComputeUnits = .cpuAndGPU,
         audioEncoderCompute: MLComputeUnits? = nil,
-        textDecoderCompute: MLComputeUnits = .cpuAndNeuralEngine,
+        textDecoderCompute: MLComputeUnits? = nil,
         prefillCompute: MLComputeUnits = .cpuOnly
     ) {
         if WhisperKit.isRunningOnSimulator {
@@ -151,10 +151,17 @@ public struct ModelComputeOptions {
             self.prefillCompute = .cpuOnly
             return
         }
-
+        if #available(iOS 16.0, *){
+            if textDecoderCompute == nil {
+                self.textDecoderCompute = .cpuAndNeuralEngine
+            } else {
+                self.textDecoderCompute = textDecoderCompute!
+            }
+        } else {
+            self.textDecoderCompute = textDecoderCompute!
+        }
         self.melCompute = melCompute
         self.prefillCompute = prefillCompute
-        self.textDecoderCompute = textDecoderCompute
 
         if #available(macOS 14.0, iOS 17.0, *) {
             self.audioEncoderCompute = audioEncoderCompute ?? .cpuAndNeuralEngine

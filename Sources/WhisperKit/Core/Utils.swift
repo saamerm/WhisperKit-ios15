@@ -48,10 +48,12 @@ extension MLMultiArray {
     }
 
     func fillLastDimension(indexes: Range<Int>, with value: FloatType) {
-        precondition(shape.count == 3 && shape[0] == 1 && shape[1] == 1, "Must have [1, 1, n] shape")
-        withUnsafeMutableBufferPointer(ofType: FloatType.self) { ptr, strides in
-            for index in indexes {
-                ptr[index * strides[2]] = value
+        if #available(iOS 16.0, *){
+            precondition(shape.count == 3 && shape[0] == 1 && shape[1] == 1, "Must have [1, 1, n] shape")
+            withUnsafeMutableBufferPointer(ofType: FloatType.self) { ptr, strides in
+                for index in indexes {
+                    ptr[index * strides[2]] = value
+                }
             }
         }
     }
@@ -80,8 +82,11 @@ extension MLMultiArray {
         )
         guard createReturn == kCVReturnSuccess else { return nil }
         guard let pixelBuffer = pixelBuffer else { return nil }
-
-        return MLMultiArray(pixelBuffer: pixelBuffer, shape: shape)
+        if #available(iOS 16.0, *){
+            return MLMultiArray(pixelBuffer: pixelBuffer, shape: shape)
+        } else {
+            return nil
+        }
     }
 }
 
