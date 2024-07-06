@@ -14,7 +14,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/saamerm/swift-transformers-ios15.git",
       "state" : {
-        "revision" : "35dbaad5bfb99199066c37816436354808367388",
+        "revision" : "484aff09e82287c7fea5e7dfdd502a10979ae096",
         "version" : "0.1.7"
       }
     }
