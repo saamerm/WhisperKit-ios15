@@ -1,4 +1,4 @@
-Use https://github.com/saamerm/WhisperKit-ios15 instead of https://github.com/argmaxinc/WhisperKit in order to use this package
+Use https://github.com/saamerm/WhisperKit-ios15 instead of https://github.com/argmaxinc/WhisperKit in order to use this package. It also references the iOS 15 version of another package that is a WhisperKit dependency. This only enables building with iOS 15, the whisper kit functionality doesnt actually work with it. So you have to add a iOS version code check in your own application
 
 <div align="center">
   
