@@ -1,3 +1,4 @@
+Use https://github.com/saamerm/WhisperKit-ios15 instead of https://github.com/argmaxinc/WhisperKit in order to use this package
 
 <div align="center">
   
