@@ -16,8 +16,8 @@ jobs:
     name: "Build and Test"
     uses: ./.github/workflows/unit-tests.yml
     with:
-      ios-version: "17.2"
-      macos-runner: "macos-14"
+      ios-version: "18.1"
+      macos-runner: "macos-15"
 
   check-approvals:
     runs-on: ubuntu-latest
@@ -25,10 +25,9 @@ jobs:
       reviews: ${{ steps.reviews.outputs.state }}
     permissions:
       pull-requests: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Check Approvals
         id: reviews
         env:

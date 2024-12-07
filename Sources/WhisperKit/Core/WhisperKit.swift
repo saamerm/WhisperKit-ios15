@@ -13,7 +13,12 @@ import Tokenizers
 open class WhisperKit {
     /// Models
     public private(set) var modelVariant: ModelVariant = .tiny
-    public private(set) var modelState: ModelState = .unloaded
+    public private(set) var modelState: ModelState = .unloaded {
+        didSet {
+            modelStateCallback?(oldValue, modelState)
+        }
+    }
+
     public var modelCompute: ModelComputeOptions
     public var tokenizer: WhisperTokenizer?
 
@@ -24,24 +29,64 @@ open class WhisperKit {
     public var textDecoder: any TextDecoding
     public var logitsFilters: [any LogitsFiltering]
     public var segmentSeeker: any SegmentSeeking
+    public var voiceActivityDetector: VoiceActivityDetector?
 
     /// Shapes
-    public static var sampleRate: Int = 16000
-    public static var hopLength: Int = 160
-    public static var chunkLength: Int = 30 // seconds
-    public static var windowSamples: Int = 480_000 // sampleRate * chunkLength
-    public static var secondsPerTimeToken = Float(0.02)
+    public static let sampleRate: Int = 16000
+    public static let hopLength: Int = 160
+    public static let chunkLength: Int = 30 // seconds
+    public static let windowSamples: Int = 480_000 // sampleRate * chunkLength
+    public static let secondsPerTimeToken = Float(0.02)
 
     /// Progress
     public private(set) var currentTimings: TranscriptionTimings
-    public let progress = Progress()
+    public private(set) var progress = Progress()
 
     /// Configuration
     public var modelFolder: URL?
     public var tokenizerFolder: URL?
-    public let useBackgroundDownloadSession: Bool
+    public private(set) var useBackgroundDownloadSession: Bool
 
-    public init(
+    /// Callbacks
+    public var segmentDiscoveryCallback: SegmentDiscoveryCallback?
+    public var modelStateCallback: ModelStateCallback?
+    public var transcriptionStateCallback: TranscriptionStateCallback?
+
+    public init(_ config: WhisperKitConfig = WhisperKitConfig()) async throws {
+        modelCompute = config.computeOptions ?? ModelComputeOptions()
+        audioProcessor = config.audioProcessor ?? AudioProcessor()
+        featureExtractor = config.featureExtractor ?? FeatureExtractor()
+        audioEncoder = config.audioEncoder ?? AudioEncoder()
+        textDecoder = config.textDecoder ?? TextDecoder()
+        logitsFilters = config.logitsFilters ?? []
+        segmentSeeker = config.segmentSeeker ?? SegmentSeeker()
+        voiceActivityDetector = config.voiceActivityDetector
+        tokenizerFolder = config.tokenizerFolder
+        useBackgroundDownloadSession = config.useBackgroundDownloadSession
+        currentTimings = TranscriptionTimings()
+        Logging.shared.logLevel = config.verbose ? config.logLevel : .none
+
+        try await setupModels(
+            model: config.model,
+            downloadBase: config.downloadBase,
+            modelRepo: config.modelRepo,
+            modelFolder: config.modelFolder,
+            download: config.download
+        )
+
+        if let prewarm = config.prewarm, prewarm {
+            Logging.info("Prewarming models...")
+            try await prewarmModels()
+        }
+
+        // If load is not passed in, load based on whether a modelFolder is passed
+        if config.load ?? (config.modelFolder != nil) {
+            Logging.info("Loading models...")
+            try await loadModels()
+        }
+    }
+
+    public convenience init(
         model: String? = nil,
         downloadBase: URL? = nil,
         modelRepo: String? = nil,
@@ -61,50 +106,33 @@ open class WhisperKit {
         download: Bool = true,
         useBackgroundDownloadSession: Bool = false
     ) async throws {
-        modelCompute = computeOptions ?? ModelComputeOptions()
-        self.audioProcessor = audioProcessor ?? AudioProcessor()
-        self.featureExtractor = featureExtractor ?? FeatureExtractor()
-        self.audioEncoder = audioEncoder ?? AudioEncoder()
-        self.textDecoder = textDecoder ?? TextDecoder()
-        self.logitsFilters = logitsFilters ?? []
-        self.segmentSeeker = segmentSeeker ?? SegmentSeeker()
-        self.tokenizerFolder = tokenizerFolder
-        self.useBackgroundDownloadSession = useBackgroundDownloadSession
-        currentTimings = TranscriptionTimings()
-        Logging.shared.logLevel = verbose ? logLevel : .none
-
-        try await setupModels(
+        let config = WhisperKitConfig(
             model: model,
             downloadBase: downloadBase,
             modelRepo: modelRepo,
             modelFolder: modelFolder,
-            download: download
+            tokenizerFolder: tokenizerFolder,
+            computeOptions: computeOptions,
+            audioProcessor: audioProcessor,
+            featureExtractor: featureExtractor,
+            audioEncoder: audioEncoder,
+            textDecoder: textDecoder,
+            logitsFilters: logitsFilters,
+            segmentSeeker: segmentSeeker,
+            verbose: verbose,
+            logLevel: logLevel,
+            prewarm: prewarm,
+            load: load,
+            download: download,
+            useBackgroundDownloadSession: useBackgroundDownloadSession
         )
-
-        if let prewarm = prewarm, prewarm {
-            Logging.info("Prewarming models...")
-            try await prewarmModels()
-        }
-
-        // If load is not passed in, load based on whether a modelFolder is passed
-        if load ?? (modelFolder != nil) {
-            Logging.info("Loading models...")
-            try await loadModels()
-        }
+        try await self.init(config)
     }
 
     // MARK: - Model Loading
 
-    public static func recommendedModels() -> (default: String, disabled: [String]) {
-        let deviceName = Self.deviceName()
-        Logging.debug("Running on \(deviceName)")
-
-        let defaultModel = modelSupport(for: deviceName).default
-        let disabledModels = modelSupport(for: deviceName).disabled
-        return (defaultModel, disabledModels)
-    }
-
     public static func deviceName() -> String {
+        #if !os(macOS) && !targetEnvironment(simulator)
         var utsname = utsname()
         uname(&utsname)
         let deviceName = withUnsafePointer(to: &utsname.machine) {
@@ -112,14 +140,52 @@ open class WhisperKit {
                 String(cString: $0)
             }
         }
+        #else
+        let deviceName = ProcessInfo.hwModel
+        #endif
         return deviceName
     }
 
-    public static func fetchAvailableModels(from repo: String = "argmaxinc/whisperkit-coreml", matching: [String] = ["openai_*", "distil-whisper_*"]) async throws -> [String] {
-        let hubApi = HubApi()
-        let modelFiles = try await hubApi.getFilenames(from: repo, matching: matching)
+    public static func recommendedModels() -> ModelSupport {
+        let deviceName = Self.deviceName()
+        Logging.debug("Running on \(deviceName)")
+        return modelSupport(for: deviceName)
+    }
 
-        return formatModelFiles(modelFiles)
+    public static func recommendedRemoteModels(from repo: String = "argmaxinc/whisperkit-coreml", downloadBase: URL? = nil) async -> ModelSupport {
+        let deviceName = Self.deviceName()
+        let config = await Self.fetchModelSupportConfig(from: repo, downloadBase: downloadBase)
+        return modelSupport(for: deviceName, from: config)
+    }
+
+    public static func fetchModelSupportConfig(from repo: String = "argmaxinc/whisperkit-coreml", downloadBase: URL? = nil) async -> ModelSupportConfig {
+        let hubApi = HubApi(downloadBase: downloadBase)
+        var modelSupportConfig = Constants.fallbackModelSupportConfig
+
+        do {
+            // Try to decode config.json into ModelSupportConfig
+            let configUrl = try await hubApi.snapshot(from: repo, matching: "config*")
+            let decoder = JSONDecoder()
+            let jsonData = try Data(contentsOf: configUrl.appendingPathComponent("config.json"))
+            modelSupportConfig = try decoder.decode(ModelSupportConfig.self, from: jsonData)
+        } catch {
+            // Allow this to fail gracefully as it uses fallback config by default
+            Logging.error(error)
+        }
+
+        return modelSupportConfig
+    }
+
+    public static func fetchAvailableModels(from repo: String = "argmaxinc/whisperkit-coreml", matching: [String] = ["*"], downloadBase: URL? = nil) async throws -> [String] {
+        let modelSupportConfig = await fetchModelSupportConfig(from: repo, downloadBase: downloadBase)
+        let supportedModels = modelSupportConfig.modelSupport().supported
+        var filteredSupportSet: Set<String> = []
+        for glob in matching {
+            filteredSupportSet = filteredSupportSet.union(supportedModels.matching(glob: glob))
+        }
+        let filteredSupport = Array(filteredSupportSet)
+
+        return formatModelFiles(filteredSupport)
     }
 
     public static func formatModelFiles(_ modelFiles: [String]) -> [String] {
@@ -212,21 +278,22 @@ open class WhisperKit {
     }
 
     /// Sets up the model folder either from a local path or by downloading from a repository.
-    public func setupModels(
+    open func setupModels(
         model: String?,
         downloadBase: URL? = nil,
         modelRepo: String?,
         modelFolder: String?,
         download: Bool
     ) async throws {
-        // Determine the model variant to use
-        let modelVariant = model ?? WhisperKit.recommendedModels().default
-
         // If a local model folder is provided, use it; otherwise, download the model
         if let folder = modelFolder {
             self.modelFolder = URL(fileURLWithPath: folder)
         } else if download {
+            // Determine the model variant to use
             let repo = modelRepo ?? "argmaxinc/whisperkit-coreml"
+            let modelSupport = await WhisperKit.recommendedRemoteModels(from: repo, downloadBase: downloadBase)
+            let modelVariant = model ?? modelSupport.default
+
             do {
                 self.modelFolder = try await Self.download(
                     variant: modelVariant,
@@ -244,11 +311,11 @@ open class WhisperKit {
         }
     }
 
-    public func prewarmModels() async throws {
+    open func prewarmModels() async throws {
         try await loadModels(prewarmMode: true)
     }
 
-    public func loadModels(
+    open func loadModels(
         prewarmMode: Bool = false
     ) async throws {
         modelState = prewarmMode ? .prewarming : .loading
@@ -261,10 +328,11 @@ open class WhisperKit {
 
         Logging.debug("Loading models from \(path.path) with prewarmMode: \(prewarmMode)")
 
-        let logmelUrl = path.appending(path: "MelSpectrogram.mlmodelc")
-        let encoderUrl = path.appending(path: "AudioEncoder.mlmodelc")
-        let decoderUrl = path.appending(path: "TextDecoder.mlmodelc")
-        let decoderPrefillUrl = path.appending(path: "TextDecoderContextPrefill.mlmodelc")
+        // Find either mlmodelc or mlpackage models
+        let logmelUrl = detectModelURL(inFolder: path, named: "MelSpectrogram")
+        let encoderUrl = detectModelURL(inFolder: path, named: "AudioEncoder")
+        let decoderUrl = detectModelURL(inFolder: path, named: "TextDecoder")
+        let decoderPrefillUrl = detectModelURL(inFolder: path, named: "TextDecoderContextPrefill")
 
         for item in [logmelUrl, encoderUrl, decoderUrl] {
             if !FileManager.default.fileExists(atPath: item.path) {
@@ -282,26 +350,6 @@ open class WhisperKit {
             Logging.debug("Loaded feature extractor")
         }
 
-        if let audioEncoder = audioEncoder as? WhisperMLModel {
-            Logging.debug("Loading audio encoder")
-            try await audioEncoder.loadModel(
-                at: encoderUrl,
-                computeUnits: modelCompute.audioEncoderCompute,
-                prewarmMode: prewarmMode
-            )
-            Logging.debug("Loaded audio encoder")
-        }
-
-        if let textDecoder = textDecoder as? WhisperMLModel {
-            Logging.debug("Loading text decoder")
-            try await textDecoder.loadModel(
-                at: decoderUrl,
-                computeUnits: modelCompute.textDecoderCompute,
-                prewarmMode: prewarmMode
-            )
-            Logging.debug("Loaded text decoder")
-        }
-
         if FileManager.default.fileExists(atPath: decoderPrefillUrl.path) {
             Logging.debug("Loading text decoder prefill data")
             textDecoder.prefillData = TextDecoderContextPrefill()
@@ -313,9 +361,46 @@ open class WhisperKit {
             Logging.debug("Loaded text decoder prefill data")
         }
 
+        if let textDecoder = textDecoder as? WhisperMLModel {
+            Logging.debug("Loading text decoder")
+            let decoderLoadStart = CFAbsoluteTimeGetCurrent()
+            try await textDecoder.loadModel(
+                at: decoderUrl,
+                computeUnits: modelCompute.textDecoderCompute,
+                prewarmMode: prewarmMode
+            )
+
+            if prewarmMode {
+                currentTimings.decoderSpecializationTime = CFAbsoluteTimeGetCurrent() - decoderLoadStart
+            } else {
+                currentTimings.decoderLoadTime = CFAbsoluteTimeGetCurrent() - decoderLoadStart
+            }
+
+            Logging.debug("Loaded text decoder in \(String(format: "%.2f", currentTimings.decoderLoadTime))s")
+        }
+
+        if let audioEncoder = audioEncoder as? WhisperMLModel {
+            Logging.debug("Loading audio encoder")
+            let encoderLoadStart = CFAbsoluteTimeGetCurrent()
+
+            try await audioEncoder.loadModel(
+                at: encoderUrl,
+                computeUnits: modelCompute.audioEncoderCompute,
+                prewarmMode: prewarmMode
+            )
+
+            if prewarmMode {
+                currentTimings.encoderSpecializationTime = CFAbsoluteTimeGetCurrent() - encoderLoadStart
+            } else {
+                currentTimings.encoderLoadTime = CFAbsoluteTimeGetCurrent() - encoderLoadStart
+            }
+
+            Logging.debug("Loaded audio encoder in \(String(format: "%.2f", currentTimings.encoderLoadTime))s")
+        }
+
         if prewarmMode {
             modelState = .prewarmed
-            currentTimings.modelLoading = CFAbsoluteTimeGetCurrent() - modelLoadStart
+            currentTimings.prewarmLoadTime = CFAbsoluteTimeGetCurrent() - modelLoadStart
             return
         }
 
@@ -326,23 +411,27 @@ open class WhisperKit {
         textDecoder.isModelMultilingual = isModelMultilingual(logitsDim: logitsDim)
         modelVariant = detectVariant(logitsDim: logitsDim, encoderDim: encoderDim)
         Logging.debug("Loading tokenizer for \(modelVariant)")
+        let tokenizerLoadStart = CFAbsoluteTimeGetCurrent()
+
         let tokenizer = try await loadTokenizer(
             for: modelVariant,
             tokenizerFolder: tokenizerFolder,
             useBackgroundSession: useBackgroundDownloadSession
         )
+        currentTimings.tokenizerLoadTime = CFAbsoluteTimeGetCurrent() - tokenizerLoadStart
+
         self.tokenizer = tokenizer
         textDecoder.tokenizer = tokenizer
-        Logging.debug("Loaded tokenizer")
+        Logging.debug("Loaded tokenizer in \(String(format: "%.2f", currentTimings.tokenizerLoadTime))s")
 
         modelState = .loaded
 
-        currentTimings.modelLoading = CFAbsoluteTimeGetCurrent() - modelLoadStart
+        currentTimings.modelLoading = CFAbsoluteTimeGetCurrent() - modelLoadStart + currentTimings.prewarmLoadTime
 
-        Logging.info("Loaded models for whisper size: \(modelVariant)")
+        Logging.info("Loaded models for whisper size: \(modelVariant) in \(String(format: "%.2f", currentTimings.modelLoading))s")
     }
 
-    public func unloadModels() async {
+    open func unloadModels() async {
         modelState = .unloading
 
         for model in [featureExtractor, audioEncoder, textDecoder] {
@@ -356,7 +445,7 @@ open class WhisperKit {
         Logging.info("Unloaded all models")
     }
 
-    public func clearState() {
+    open func clearState() {
         audioProcessor.stopRecording()
         currentTimings = TranscriptionTimings()
     }
@@ -366,7 +455,7 @@ open class WhisperKit {
     }
 
     /// Pass in your own logging callback here
-    public func loggingCallback(_ callback: Logging.LoggingCallback?) {
+    open func loggingCallback(_ callback: Logging.LoggingCallback?) {
         Logging.shared.loggingCallback = callback
     }
 
@@ -376,10 +465,11 @@ open class WhisperKit {
     ///
     /// - Parameter audioPath: The file path of the audio file.
     /// - Returns: A tuple containing the detected language and the language log probabilities.
-    public func detectLanguage(
+    open func detectLanguage(
         audioPath: String
     ) async throws -> (language: String, langProbs: [String: Float]) {
-        let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioPath)
+        // Only need the first 30s for language detection
+        let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioPath, endTime: 30.0)
         let audioArray = AudioProcessor.convertBufferToArray(buffer: audioBuffer)
         return try await detectLangauge(audioArray: audioArray)
     }
@@ -388,7 +478,7 @@ open class WhisperKit {
     ///
     /// - Parameter audioArray: An array of audio samples.
     /// - Returns: A tuple containing the detected language and the language log probabilities.
-    public func detectLangauge(
+    open func detectLangauge(
         audioArray: [Float]
     ) async throws -> (language: String, langProbs: [String: Float]) {
         if modelState != .loaded {
@@ -399,13 +489,13 @@ open class WhisperKit {
         guard textDecoder.isModelMultilingual else {
             throw WhisperError.decodingFailed("Language detection not supported for this model")
         }
-        
+
         // Tokenizer required for decoding
         guard let tokenizer else {
             throw WhisperError.tokenizerUnavailable()
         }
 
-        let options = DecodingOptions()
+        let options = DecodingOptions(verbose: Logging.shared.logLevel != .none)
         let decoderInputs = try textDecoder.prepareDecoderInputs(withPrompt: [tokenizer.specialTokens.startOfTranscriptToken])
         decoderInputs.kvCacheUpdateMask[0] = 1.0
         decoderInputs.decoderKeyPaddingMask[0] = 0.0
@@ -439,7 +529,7 @@ open class WhisperKit {
 
     /// Convenience method to transcribe multiple audio files asynchronously and return the results as an array of optional arrays of `TranscriptionResult`.
     /// - Returns: An array of optional arrays containing `TranscriptionResult`.
-    public func transcribe(
+    open func transcribe(
         audioPaths: [String],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -464,11 +554,13 @@ open class WhisperKit {
     ///   - callback: Optional callback to receive updates during the transcription process.
     ///
     /// - Returns: An array of `Result` objects with either a successful transcription result or an error.
-    public func transcribeWithResults(
+    open func transcribeWithResults(
         audioPaths: [String],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
     ) async -> [Result<[TranscriptionResult], Swift.Error>] {
+        transcriptionStateCallback?(.convertingAudio)
+
         // Start timing the audio loading and conversion process
         let loadAudioStart = Date()
 
@@ -480,6 +572,11 @@ open class WhisperKit {
         let loadAndConvertTime = Date().timeIntervalSince(loadAudioStart)
         currentTimings.audioLoading = loadAndConvertTime
         Logging.debug("Total Audio Loading and Converting Time: \(loadAndConvertTime)")
+
+        transcriptionStateCallback?(.transcribing)
+        defer {
+            transcriptionStateCallback?(.finished)
+        }
 
         // Transcribe the loaded audio arrays
         let transcribeResults = await transcribeWithResults(
@@ -512,7 +609,7 @@ open class WhisperKit {
 
     /// Convenience method to transcribe multiple audio arrays asynchronously and return the results as an array of optional arrays of `TranscriptionResult`.
     /// - Returns: An array of optional arrays containing `TranscriptionResult`.
-    public func transcribe(
+    open func transcribe(
         audioArrays: [[Float]],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -538,7 +635,7 @@ open class WhisperKit {
     ///   - callback: Optional callback to receive updates during the transcription process.
     ///
     /// - Returns: An array of `Result` objects, each containing either a successful transcription result or an error.
-    public func transcribeWithResults(
+    open func transcribeWithResults(
         audioArrays: [[Float]],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -559,7 +656,7 @@ open class WhisperKit {
     ///  - callback: Optional callback to receive updates during the transcription process.
     ///
     /// - Returns: An array of `Result` objects, each containing either a successful transcription result or an error.
-    public func transcribeWithOptions(
+    open func transcribeWithOptions(
         audioArrays: [[Float]],
         decodeOptionsArray: [DecodingOptions?] = [nil],
         callback: TranscriptionCallback = nil
@@ -624,6 +721,7 @@ open class WhisperKit {
             // Append the results of each batch to the final result array
             result.append(contentsOf: partialResult)
         }
+
         return result
     }
 
@@ -631,7 +729,7 @@ open class WhisperKit {
 
     @available(*, deprecated, message: "Subject to removal in a future version. Use `transcribe(audioPath:decodeOptions:callback:) async throws -> [TranscriptionResult]` instead.")
     @_disfavoredOverload
-    public func transcribe(
+    open func transcribe(
         audioPath: String,
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -647,22 +745,32 @@ open class WhisperKit {
     ///   - callback: Optional callback to receive updates during the transcription process.
     /// - Returns: An array of `TranscriptionResult`.
     /// - Throws: An error if the transcription fails.
-    public func transcribe(
+    open func transcribe(
         audioPath: String,
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
     ) async throws -> [TranscriptionResult] {
+        transcriptionStateCallback?(.convertingAudio)
+
         // Process input audio file into audio samples
-        let loadAudioStart = Date()
-        let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioPath)
-        let loadTime = Date().timeIntervalSince(loadAudioStart)
+        let audioArray = try await withThrowingTaskGroup(of: [Float].self) { group -> [Float] in
+            let convertAudioStart = Date()
+            defer {
+                let convertTime = Date().timeIntervalSince(convertAudioStart)
+                currentTimings.audioLoading = convertTime
+                Logging.debug("Audio loading and convert time: \(convertTime)")
+                logCurrentMemoryUsage("Audio Loading and Convert")
+            }
 
-        let convertAudioStart = Date()
-        let audioArray = AudioProcessor.convertBufferToArray(buffer: audioBuffer)
-        let convertTime = Date().timeIntervalSince(convertAudioStart)
-        currentTimings.audioLoading = loadTime + convertTime
-        Logging.debug("Audio loading time: \(loadTime), Audio convert time: \(convertTime)")
+            return try AudioProcessor.loadAudioAsFloatArray(fromPath: audioPath)
+        }
 
+        transcriptionStateCallback?(.transcribing)
+        defer {
+            transcriptionStateCallback?(.finished)
+        }
+
+        // Send converted samples to be transcribed
         let transcribeResults: [TranscriptionResult] = try await transcribe(
             audioArray: audioArray,
             decodeOptions: decodeOptions,
@@ -677,7 +785,7 @@ open class WhisperKit {
     /// Deprecated
     @available(*, deprecated, message: "Subject to removal in a future version. Use `transcribe(audioArray:decodeOptions:callback:) async throws -> [TranscriptionResult]` instead.")
     @_disfavoredOverload
-    public func transcribe(
+    open func transcribe(
         audioArray: [Float],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -693,7 +801,7 @@ open class WhisperKit {
     ///   - callback: Optional callback to receive updates during the transcription process.
     /// - Returns: An array of sorted `TranscriptionResult`.
     /// - Throws: An error if the transcription fails.
-    public func transcribe(
+    open func transcribe(
         audioArray: [Float],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -705,12 +813,15 @@ open class WhisperKit {
         switch (isChunkable, decodeOptions?.chunkingStrategy) {
             case (true, .vad):
                 // We have some audio that will require multiple windows and a strategy to chunk them
-                let chunker = VADAudioChunker()
+                let vad = voiceActivityDetector ?? EnergyVAD()
+                let chunker = VADAudioChunker(vad: vad)
                 let audioChunks: [AudioChunk] = try await chunker.chunkAll(
                     audioArray: audioArray,
                     maxChunkLength: WhisperKit.windowSamples,
                     decodeOptions: decodeOptions
                 )
+
+                progress.totalUnitCount = max(progress.totalUnitCount, Int64(audioChunks.count))
 
                 // Reset the seek times since we've already chunked the audio
                 var chunkedOptions = decodeOptions
@@ -754,7 +865,7 @@ open class WhisperKit {
     /// Runs the transcription task on a single audio sample array asynchronously.
     /// - Returns: An array of `TranscriptionResult`.
     /// - Throws: An error if the transcription fails or if the tokenizer is unavailable.
-    private func runTranscribeTask(
+    open func runTranscribeTask(
         audioArray: [Float],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
@@ -767,28 +878,50 @@ open class WhisperKit {
             // Tokenizer required for decoding
             throw WhisperError.tokenizerUnavailable()
         }
-        try Task.checkCancellation()
 
-        let childProgress = Progress()
-        progress.totalUnitCount += 1
-        progress.addChild(childProgress, withPendingUnitCount: 1)
-        let transcribeTask = TranscribeTask(
-            currentTimings: currentTimings,
-            progress: childProgress,
-            audioEncoder: audioEncoder,
-            featureExtractor: featureExtractor,
-            segmentSeeker: segmentSeeker,
-            textDecoder: textDecoder,
-            tokenizer: tokenizer
-        )
-        let transcribeTaskResult = try await transcribeTask.run(
-            audioArray: audioArray,
-            decodeOptions: decodeOptions,
-            callback: callback
-        )
-        if let decodeOptions, decodeOptions.verbose {
-            transcribeTaskResult.logTimings()
+        do {
+            try Task.checkCancellation()
+
+            let childProgress = Progress()
+            // Total can be set elsewhere, here ensures it is at least 1
+            progress.totalUnitCount = max(1, progress.totalUnitCount)
+            progress.addChild(childProgress, withPendingUnitCount: 1)
+
+            let transcribeTask = TranscribeTask(
+                currentTimings: currentTimings,
+                progress: childProgress,
+                audioEncoder: audioEncoder,
+                featureExtractor: featureExtractor,
+                segmentSeeker: segmentSeeker,
+                textDecoder: textDecoder,
+                tokenizer: tokenizer
+            )
+
+            transcribeTask.segmentDiscoveryCallback = self.segmentDiscoveryCallback
+
+            let transcribeTaskResult = try await transcribeTask.run(
+                audioArray: audioArray,
+                decodeOptions: decodeOptions,
+                callback: callback
+            )
+
+            if let decodeOptions, decodeOptions.verbose {
+                transcribeTaskResult.logTimings()
+            }
+
+            if progress.isFinished {
+                // Reset progress if it is completed
+                progress = Progress()
+            }
+
+            return [transcribeTaskResult]
+        } catch {
+            // Handle cancellation
+            if error is CancellationError {
+                // Reset progress when cancelled
+                progress = Progress()
+            }
+            throw error
         }
-        return [transcribeTaskResult]
     }
 }

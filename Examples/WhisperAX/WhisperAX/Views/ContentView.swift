@@ -12,16 +12,17 @@ import AVFoundation
 import CoreML
 
 struct ContentView: View {
-    @State var whisperKit: WhisperKit? = nil
+    @State private var whisperKit: WhisperKit?
     #if os(macOS)
-    @State var audioDevices: [AudioDevice]? = nil
+    @State private var audioDevices: [AudioDevice]?
     #endif
-    @State var isRecording: Bool = false
-    @State var isTranscribing: Bool = false
-    @State var currentText: String = ""
-    @State var currentChunks: [Int: (chunkText: [String], fallbacks: Int)] = [:]
+    @State private var isRecording: Bool = false
+    @State private var isTranscribing: Bool = false
+    @State private var currentText: String = ""
+    @State private var currentChunks: [Int: (chunkText: [String], fallbacks: Int)] = [:]
     // TODO: Make this configurable in the UI
-    @State var modelStorage: String = "huggingface/models/argmaxinc/whisperkit-coreml"
+    @State private var modelStorage: String = "huggingface/models/argmaxinc/whisperkit-coreml"
+    @State private var appStartTime = Date()
 
     // MARK: Model management
 
@@ -49,9 +50,11 @@ struct ContentView: View {
     @AppStorage("compressionCheckWindow") private var compressionCheckWindow: Double = 60
     @AppStorage("sampleLength") private var sampleLength: Double = 224
     @AppStorage("silenceThreshold") private var silenceThreshold: Double = 0.3
+    @AppStorage("realtimeDelayInterval") private var realtimeDelayInterval: Double = 1
     @AppStorage("useVAD") private var useVAD: Bool = true
     @AppStorage("tokenConfirmationsNeeded") private var tokenConfirmationsNeeded: Double = 2
-    @AppStorage("chunkingStrategy") private var chunkingStrategy: ChunkingStrategy = .none
+    @AppStorage("concurrentWorkerCount") private var concurrentWorkerCount: Double = 4
+    @AppStorage("chunkingStrategy") private var chunkingStrategy: ChunkingStrategy = .vad
     @AppStorage("encoderComputeUnits") private var encoderComputeUnits: MLComputeUnits = .cpuAndNeuralEngine
     @AppStorage("decoderComputeUnits") private var decoderComputeUnits: MLComputeUnits = .cpuAndNeuralEngine
 
@@ -60,6 +63,7 @@ struct ContentView: View {
     @State private var loadingProgressValue: Float = 0.0
     @State private var specializationProgressRatio: Float = 0.7
     @State private var isFilePickerPresented = false
+    @State private var modelLoadingTime: TimeInterval = 0
     @State private var firstTokenTime: TimeInterval = 0
     @State private var pipelineStart: TimeInterval = 0
     @State private var effectiveRealTimeFactor: TimeInterval = 0
@@ -95,9 +99,9 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showComputeUnits: Bool = true
     @State private var showAdvancedOptions: Bool = false
-    @State private var transcriptionTask: Task<Void, Never>? = nil
+    @State private var transcriptionTask: Task<Void, Never>?
     @State private var selectedCategoryId: MenuItem.ID?
-    @State private var transcribeFileTask: Task<Void, Never>? = nil
+    @State private var transcribeTask: Task<Void, Never>?
 
     struct MenuItem: Identifiable, Hashable {
         var id = UUID()
@@ -110,9 +114,8 @@ struct ContentView: View {
         MenuItem(name: "Stream", image: "waveform.badge.mic"),
     ]
 
-
     private var isStreamMode: Bool {
-        self.selectedCategoryId == menu.first(where: { $0.name == "Stream" })?.id
+        selectedCategoryId == menu.first(where: { $0.name == "Stream" })?.id
     }
 
     func getComputeOptions() -> ModelComputeOptions {
@@ -122,7 +125,7 @@ struct ContentView: View {
     // MARK: Views
 
     func resetState() {
-        transcribeFileTask?.cancel()
+        transcribeTask?.cancel()
         isRecording = false
         isTranscribing = false
         whisperKit?.audioProcessor.stopRecording()
@@ -180,6 +183,25 @@ struct ContentView: View {
                 }
                 .disabled(modelState != .loaded)
                 .foregroundColor(modelState != .loaded ? .secondary : .primary)
+
+                Spacer()
+
+                // New section for app and device info
+                VStack(alignment: .leading, spacing: 4) {
+                    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+                    let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
+                    Text("App Version: \(version) (\(build))")
+                    #if os(iOS)
+                    Text("Device Model: \(WhisperKit.deviceName())")
+                    Text("OS Version: \(UIDevice.current.systemVersion)")
+                    #elseif os(macOS)
+                    Text("Device Model: \(WhisperKit.deviceName())")
+                    Text("OS Version: \(ProcessInfo.processInfo.operatingSystemVersionString)")
+                    #endif
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+                .padding(.vertical)
             }
             .navigationTitle("WhisperAX")
             .navigationSplitViewColumnWidth(min: 300, ideal: 350)
@@ -202,7 +224,7 @@ struct ContentView: View {
             .toolbar(content: {
                 ToolbarItem {
                     Button {
-                        if (!enableEagerDecoding) {
+                        if !enableEagerDecoding {
                             let fullTranscript = formatSegments(confirmedSegments + unconfirmedSegments, withTimestamps: enableTimestamps).joined(separator: "\n")
                             #if os(iOS)
                             UIPasteboard.general.string = fullTranscript
@@ -230,6 +252,10 @@ struct ContentView: View {
         .onAppear {
             #if os(macOS)
             selectedCategoryId = menu.first(where: { $0.name == selectedTab })?.id
+            #else
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                selectedCategoryId = menu.first(where: { $0.name == selectedTab })?.id
+            }
             #endif
             fetchModels()
         }
@@ -311,15 +337,27 @@ struct ContentView: View {
             .textSelection(.enabled)
             .padding()
             if let whisperKit,
-               !isRecording,
-               !isTranscribing,
-               whisperKit.progress.fractionCompleted > 0,
+               !isStreamMode,
+               isTranscribing,
+               let task = transcribeTask,
+               !task.isCancelled,
                whisperKit.progress.fractionCompleted < 1
             {
-                ProgressView(whisperKit.progress)
-                    .progressViewStyle(.linear)
-                    .labelsHidden()
-                    .padding(.horizontal)
+                HStack {
+                    ProgressView(whisperKit.progress)
+                        .progressViewStyle(.linear)
+                        .labelsHidden()
+                        .padding(.horizontal)
+
+                    Button {
+                        transcribeTask?.cancel()
+                        transcribeTask = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                }
             }
         }
     }
@@ -337,7 +375,7 @@ struct ContentView: View {
 
                     Spacer()
 
-                    if availableModels.count > 0 {
+                    if !availableModels.isEmpty {
                         Picker("", selection: $selectedModel) {
                             ForEach(availableModels, id: \.self) { model in
                                 HStack {
@@ -363,7 +401,7 @@ struct ContentView: View {
                     })
                     .help("Delete model")
                     .buttonStyle(BorderlessButtonStyle())
-                    .disabled(localModels.count == 0)
+                    .disabled(localModels.isEmpty)
                     .disabled(!localModels.contains(selectedModel))
 
                     #if os(macOS)
@@ -481,7 +519,7 @@ struct ContentView: View {
         Group {
             #if os(macOS)
             HStack {
-                if let audioDevices = audioDevices, audioDevices.count > 0 {
+                if let audioDevices = audioDevices, !audioDevices.isEmpty {
                     Picker("", selection: $selectedAudioInput) {
                         ForEach(audioDevices, id: \.self) { device in
                             Text(device.name).tag(device.name)
@@ -706,7 +744,7 @@ struct ContentView: View {
                 }
                 .disabled(!(whisperKit?.modelVariant.isMultilingual ?? false))
             } label: {
-                Label("Language", systemImage: "globe")
+                Label("Source Language", systemImage: "globe")
             }
             .padding(.horizontal)
             .padding(.top)
@@ -794,21 +832,29 @@ struct ContentView: View {
             }
             .padding(.horizontal)
 
-            HStack {
-                Text("Chunking Strategy")
-                InfoButton("Select the strategy to use for chunking audio data. If VAD is selected, the audio will be chunked based on voice activity (split on silent portions).")
-                Spacer()
-                Picker("", selection: $chunkingStrategy) {
-                    Text("None").tag(ChunkingStrategy.none)
-                    Text("VAD").tag(ChunkingStrategy.vad)
+            VStack {
+                HStack {
+                    Text("Chunking Strategy")
+                    InfoButton("Select the strategy to use for chunking audio data. If VAD is selected, the audio will be chunked based on voice activity (split on silent portions).")
+                    Spacer()
+                    Picker("", selection: $chunkingStrategy) {
+                        Text("None").tag(ChunkingStrategy.none)
+                        Text("VAD").tag(ChunkingStrategy.vad)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
                 }
-                .pickerStyle(SegmentedPickerStyle())
+                HStack {
+                    Text("Workers:")
+                    Slider(value: $concurrentWorkerCount, in: 0...32, step: 1)
+                    Text(concurrentWorkerCount.formatted(.number))
+                    InfoButton("How many workers to run transcription concurrently. Higher values increase memory usage but saturate the selected compute unit more, resulting in faster transcriptions. A value of 0 will use unlimited workers.")
+                }
             }
             .padding(.horizontal)
             .padding(.bottom)
 
             VStack {
-                Text("Starting Temperature:")
+                Text("Starting Temperature")
                 HStack {
                     Slider(value: $temperatureStart, in: 0...1, step: 0.1)
                     Text(temperatureStart.formatted(.number))
@@ -818,7 +864,7 @@ struct ContentView: View {
             .padding(.horizontal)
 
             VStack {
-                Text("Max Fallback Count:")
+                Text("Max Fallback Count")
                 HStack {
                     Slider(value: $fallbackCount, in: 0...5, step: 1)
                     Text(fallbackCount.formatted(.number))
@@ -857,6 +903,17 @@ struct ContentView: View {
                     Text(silenceThreshold.formatted(.number))
                         .frame(width: 30)
                     InfoButton("Relative silence threshold for the audio. \n Baseline is set by the quietest 100ms in the previous 2 seconds.")
+                }
+            }
+            .padding(.horizontal)
+
+            VStack {
+                Text("Realtime Delay Interval")
+                HStack {
+                    Slider(value: $realtimeDelayInterval, in: 0...30, step: 1)
+                    Text(realtimeDelayInterval.formatted(.number))
+                        .frame(width: 30)
+                    InfoButton("Controls how long to wait for audio buffer to fill before running successive loops in streaming mode.\nHigher values will reduce the number of loops run per second, saving battery at the cost of higher latency.")
                 }
             }
             .padding(.horizontal)
@@ -906,7 +963,7 @@ struct ContentView: View {
 
         var body: some View {
             Button(action: {
-                self.showInfo = true
+                showInfo = true
             }) {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
@@ -944,9 +1001,7 @@ struct ContentView: View {
 
         localModels = WhisperKit.formatModelFiles(localModels)
         for model in localModels {
-            if !availableModels.contains(model),
-               !disabledModels.contains(model)
-            {
+            if !availableModels.contains(model) {
                 availableModels.append(model)
             }
         }
@@ -955,12 +1010,17 @@ struct ContentView: View {
         print("Previously selected model: \(selectedModel)")
 
         Task {
-            let remoteModels = try await WhisperKit.fetchAvailableModels(from: repoName)
-            for model in remoteModels {
-                if !availableModels.contains(model),
-                   !disabledModels.contains(model)
-                {
-                    availableModels.append(model)
+            let remoteModelSupport = await WhisperKit.recommendedRemoteModels()
+            await MainActor.run {
+                for model in remoteModelSupport.supported {
+                    if !availableModels.contains(model) {
+                        availableModels.append(model)
+                    }
+                }
+                for model in remoteModelSupport.disabled {
+                    if !disabledModels.contains(model) {
+                        disabledModels.append(model)
+                    }
                 }
             }
         }
@@ -978,14 +1038,13 @@ struct ContentView: View {
 
         whisperKit = nil
         Task {
-            whisperKit = try await WhisperKit(
-                computeOptions: getComputeOptions(),
-                verbose: true,
-                logLevel: .debug,
-                prewarm: false,
-                load: false,
-                download: false
-            )
+            let config = WhisperKitConfig(computeOptions: getComputeOptions(),
+                                          verbose: true,
+                                          logLevel: .debug,
+                                          prewarm: false,
+                                          load: false,
+                                          download: false)
+            whisperKit = try await WhisperKit(config)
             guard let whisperKit = whisperKit else {
                 return
             }
@@ -1149,12 +1208,14 @@ struct ContentView: View {
     func transcribeFile(path: String) {
         resetState()
         whisperKit?.audioProcessor = AudioProcessor()
-        self.transcribeFileTask = Task {
+        transcribeTask = Task {
+            isTranscribing = true
             do {
                 try await transcribeCurrentFile(path: path)
             } catch {
                 print("File selection error: \(error.localizedDescription)")
             }
+            isTranscribing = false
         }
     }
 
@@ -1179,8 +1240,8 @@ struct ContentView: View {
 
                 var deviceId: DeviceID?
                 #if os(macOS)
-                if self.selectedAudioInput != "No Audio Input",
-                   let devices = self.audioDevices,
+                if selectedAudioInput != "No Audio Input",
+                   let devices = audioDevices,
                    let device = devices.first(where: { $0.name == selectedAudioInput })
                 {
                     deviceId = device.id
@@ -1218,11 +1279,33 @@ struct ContentView: View {
 
         // If not looping, transcribe the full buffer
         if !loop {
-            Task {
+            transcribeTask = Task {
+                isTranscribing = true
                 do {
                     try await transcribeCurrentBuffer()
                 } catch {
                     print("Error: \(error.localizedDescription)")
+                }
+                finalizeText()
+                isTranscribing = false
+            }
+        }
+
+        finalizeText()
+    }
+
+    func finalizeText() {
+        // Finalize unconfirmed text
+        Task {
+            await MainActor.run {
+                if hypothesisText != "" {
+                    confirmedText += hypothesisText
+                    hypothesisText = ""
+                }
+
+                if !unconfirmedSegments.isEmpty {
+                    confirmedSegments.append(contentsOf: unconfirmedSegments)
+                    unconfirmedSegments = []
                 }
             }
         }
@@ -1231,8 +1314,16 @@ struct ContentView: View {
     // MARK: - Transcribe Logic
 
     func transcribeCurrentFile(path: String) async throws {
-        let audioFileBuffer = try AudioProcessor.loadAudio(fromPath: path)
-        let audioFileSamples = AudioProcessor.convertBufferToArray(buffer: audioFileBuffer)
+        // Load and convert buffer in a limited scope
+        Logging.debug("Loading audio file: \(path)")
+        let loadingStart = Date()
+        let audioFileSamples = try await Task {
+            try autoreleasepool {
+                try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
+            }
+        }.value
+        Logging.debug("Loaded audio file in \(Date().timeIntervalSince(loadingStart)) seconds")
+
         let transcription = try await transcribeAudioSamples(audioFileSamples)
 
         await MainActor.run {
@@ -1241,15 +1332,16 @@ struct ContentView: View {
                 return
             }
 
-            self.tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
-            self.effectiveRealTimeFactor = transcription?.timings.realTimeFactor ?? 0
-            self.effectiveSpeedFactor = transcription?.timings.speedFactor ?? 0
-            self.currentEncodingLoops = Int(transcription?.timings.totalEncodingRuns ?? 0)
-            self.firstTokenTime = transcription?.timings.firstTokenTime ?? 0
-            self.pipelineStart = transcription?.timings.pipelineStart ?? 0
-            self.currentLag = transcription?.timings.decodingLoop ?? 0
+            tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
+            effectiveRealTimeFactor = transcription?.timings.realTimeFactor ?? 0
+            effectiveSpeedFactor = transcription?.timings.speedFactor ?? 0
+            currentEncodingLoops = Int(transcription?.timings.totalEncodingRuns ?? 0)
+            firstTokenTime = transcription?.timings.firstTokenTime ?? 0
+            modelLoadingTime = transcription?.timings.modelLoading ?? 0
+            pipelineStart = transcription?.timings.pipelineStart ?? 0
+            currentLag = transcription?.timings.decodingLoop ?? 0
 
-            self.confirmedSegments = segments
+            confirmedSegments = segments
         }
     }
 
@@ -1258,7 +1350,7 @@ struct ContentView: View {
 
         let languageCode = Constants.languages[selectedLanguage, default: Constants.defaultLanguageCode]
         let task: DecodingTask = selectedTask == "transcribe" ? .transcribe : .translate
-        let seekClip: [Float] = []
+        let seekClip: [Float] = [lastConfirmedSegmentEndSeconds]
 
         let options = DecodingOptions(
             verbose: true,
@@ -1271,7 +1363,9 @@ struct ContentView: View {
             usePrefillCache: enableCachePrefill,
             skipSpecialTokens: !enableSpecialCharacters,
             withoutTimestamps: !enableTimestamps,
+            wordTimestamps: true,
             clipTimestamps: seekClip,
+            concurrentWorkerCount: Int(concurrentWorkerCount),
             chunkingStrategy: chunkingStrategy
         )
 
@@ -1279,11 +1373,11 @@ struct ContentView: View {
         let decodingCallback: ((TranscriptionProgress) -> Bool?) = { (progress: TranscriptionProgress) in
             DispatchQueue.main.async {
                 let fallbacks = Int(progress.timings.totalDecodingFallbacks)
-                let chunkId = progress.windowId
+                let chunkId = isStreamMode ? 0 : progress.windowId
 
                 // First check if this is a new window for the same chunk, append if so
                 var updatedChunk = (chunkText: [progress.text], fallbacks: fallbacks)
-                if var currentChunk = self.currentChunks[chunkId], let previousChunkText = currentChunk.chunkText.last {
+                if var currentChunk = currentChunks[chunkId], let previousChunkText = currentChunk.chunkText.last {
                     if progress.text.count >= previousChunkText.count {
                         // This is the same window of an existing chunk, so we just update the last value
                         currentChunk.chunkText[currentChunk.chunkText.endIndex - 1] = progress.text
@@ -1292,7 +1386,7 @@ struct ContentView: View {
                         // This is either a new window or a fallback (only in streaming mode)
                         if fallbacks == currentChunk.fallbacks && isStreamMode {
                             // New window (since fallbacks havent changed)
-                            updatedChunk.chunkText = currentChunk.chunkText + [progress.text]
+                            updatedChunk.chunkText = [updatedChunk.chunkText.first ?? "" + progress.text]
                         } else {
                             // Fallback, overwrite the previous bad text
                             updatedChunk.chunkText[currentChunk.chunkText.endIndex - 1] = progress.text
@@ -1303,12 +1397,12 @@ struct ContentView: View {
                 }
 
                 // Set the new text for the chunk
-                self.currentChunks[chunkId] = updatedChunk
-                let joinedChunks = self.currentChunks.sorted { $0.key < $1.key }.flatMap { $0.value.chunkText }.joined(separator: "\n")
+                currentChunks[chunkId] = updatedChunk
+                let joinedChunks = currentChunks.sorted { $0.key < $1.key }.flatMap { $0.value.chunkText }.joined(separator: "\n")
 
-                self.currentText = joinedChunks
-                self.currentFallbacks = fallbacks
-                self.currentDecodingLoops += 1
+                currentText = joinedChunks
+                currentFallbacks = fallbacks
+                currentDecodingLoops += 1
             }
 
             // Check early stopping
@@ -1346,7 +1440,7 @@ struct ContentView: View {
         transcriptionTask = Task {
             while isRecording && isTranscribing {
                 do {
-                    try await transcribeCurrentBuffer()
+                    try await transcribeCurrentBuffer(delayInterval: Float(realtimeDelayInterval))
                 } catch {
                     print("Error: \(error.localizedDescription)")
                     break
@@ -1360,7 +1454,7 @@ struct ContentView: View {
         transcriptionTask?.cancel()
     }
 
-    func transcribeCurrentBuffer() async throws {
+    func transcribeCurrentBuffer(delayInterval: Float = 1.0) async throws {
         guard let whisperKit = whisperKit else { return }
 
         // Retrieve the current audio buffer from the audio processor
@@ -1370,8 +1464,8 @@ struct ContentView: View {
         let nextBufferSize = currentBuffer.count - lastBufferSize
         let nextBufferSeconds = Float(nextBufferSize) / Float(WhisperKit.sampleRate)
 
-        // Only run the transcribe if the next buffer has at least 1 second of audio
-        guard nextBufferSeconds > 1 else {
+        // Only run the transcribe if the next buffer has at least `delayInterval` seconds of audio
+        guard nextBufferSeconds > delayInterval else {
             await MainActor.run {
                 if currentText == "" {
                     currentText = "Waiting for speech..."
@@ -1419,16 +1513,18 @@ struct ContentView: View {
             // Run realtime transcribe using word timestamps for segmentation
             let transcription = try await transcribeEagerMode(Array(currentBuffer))
             await MainActor.run {
-                self.tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
-                self.firstTokenTime = transcription?.timings.firstTokenTime ?? 0
-                self.pipelineStart = transcription?.timings.pipelineStart ?? 0
-                self.currentLag = transcription?.timings.decodingLoop ?? 0
-                self.currentEncodingLoops = Int(transcription?.timings.totalEncodingRuns ?? 0)
+                currentText = ""
+                tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
+                firstTokenTime = transcription?.timings.firstTokenTime ?? 0
+                modelLoadingTime = transcription?.timings.modelLoading ?? 0
+                pipelineStart = transcription?.timings.pipelineStart ?? 0
+                currentLag = transcription?.timings.decodingLoop ?? 0
+                currentEncodingLoops = Int(transcription?.timings.totalEncodingRuns ?? 0)
 
                 let totalAudio = Double(currentBuffer.count) / Double(WhisperKit.sampleRate)
-                self.totalInferenceTime = transcription?.timings.fullPipeline ?? 0
-                self.effectiveRealTimeFactor = Double(totalInferenceTime) / totalAudio
-                self.effectiveSpeedFactor = totalAudio / Double(totalInferenceTime)
+                totalInferenceTime = transcription?.timings.fullPipeline ?? 0
+                effectiveRealTimeFactor = Double(totalInferenceTime) / totalAudio
+                effectiveSpeedFactor = totalAudio / Double(totalInferenceTime)
             }
         } else {
             // Run realtime transcribe using timestamp tokens directly
@@ -1441,16 +1537,17 @@ struct ContentView: View {
                     return
                 }
 
-                self.tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
-                self.firstTokenTime = transcription?.timings.firstTokenTime ?? 0
-                self.pipelineStart = transcription?.timings.pipelineStart ?? 0
-                self.currentLag = transcription?.timings.decodingLoop ?? 0
-                self.currentEncodingLoops += Int(transcription?.timings.totalEncodingRuns ?? 0)
+                tokensPerSecond = transcription?.timings.tokensPerSecond ?? 0
+                firstTokenTime = transcription?.timings.firstTokenTime ?? 0
+                modelLoadingTime = transcription?.timings.modelLoading ?? 0
+                pipelineStart = transcription?.timings.pipelineStart ?? 0
+                currentLag = transcription?.timings.decodingLoop ?? 0
+                currentEncodingLoops += Int(transcription?.timings.totalEncodingRuns ?? 0)
 
                 let totalAudio = Double(currentBuffer.count) / Double(WhisperKit.sampleRate)
-                self.totalInferenceTime += transcription?.timings.fullPipeline ?? 0
-                self.effectiveRealTimeFactor = Double(totalInferenceTime) / totalAudio
-                self.effectiveSpeedFactor = totalAudio / Double(totalInferenceTime)
+                totalInferenceTime += transcription?.timings.fullPipeline ?? 0
+                effectiveRealTimeFactor = Double(totalInferenceTime) / totalAudio
+                effectiveSpeedFactor = totalAudio / Double(totalInferenceTime)
 
                 // Logic for moving segments to confirmedSegments
                 if segments.count > requiredSegmentsForConfirmation {
@@ -1464,18 +1561,21 @@ struct ContentView: View {
                     // Update lastConfirmedSegmentEnd based on the last confirmed segment
                     if let lastConfirmedSegment = confirmedSegmentsArray.last, lastConfirmedSegment.end > lastConfirmedSegmentEndSeconds {
                         lastConfirmedSegmentEndSeconds = lastConfirmedSegment.end
+                        print("Last confirmed segment end: \(lastConfirmedSegmentEndSeconds)")
 
                         // Add confirmed segments to the confirmedSegments array
-                        if !self.confirmedSegments.contains(confirmedSegmentsArray) {
-                            self.confirmedSegments.append(contentsOf: confirmedSegmentsArray)
+                        for segment in confirmedSegmentsArray {
+                            if !confirmedSegments.contains(segment: segment) {
+                                confirmedSegments.append(segment)
+                            }
                         }
                     }
 
                     // Update transcriptions to reflect the remaining segments
-                    self.unconfirmedSegments = remainingSegments
+                    unconfirmedSegments = remainingSegments
                 } else {
                     // Handle the case where segments are fewer or equal to required
-                    self.unconfirmedSegments = segments
+                    unconfirmedSegments = segments
                 }
             }
         }
@@ -1506,7 +1606,8 @@ struct ContentView: View {
             skipSpecialTokens: !enableSpecialCharacters,
             withoutTimestamps: !enableTimestamps,
             wordTimestamps: true, // required for eager mode
-            firstTokenLogProbThreshold: -1.5 // higher threshold to prevent fallbacks from running to often
+            firstTokenLogProbThreshold: -1.5, // higher threshold to prevent fallbacks from running to often
+            chunkingStrategy: ChunkingStrategy.none
         )
 
         // Early stopping checks
@@ -1514,15 +1615,15 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 let fallbacks = Int(progress.timings.totalDecodingFallbacks)
                 if progress.text.count < currentText.count {
-                    if fallbacks == self.currentFallbacks {
+                    if fallbacks == currentFallbacks {
                         //                        self.unconfirmedText.append(currentText)
                     } else {
                         print("Fallback occured: \(fallbacks)")
                     }
                 }
-                self.currentText = progress.text
-                self.currentFallbacks = fallbacks
-                self.currentDecodingLoops += 1
+                currentText = progress.text
+                currentFallbacks = fallbacks
+                currentDecodingLoops += 1
             }
             // Check early stopping
             let currentTokens = progress.tokens
@@ -1584,17 +1685,18 @@ struct ContentView: View {
                     eagerResults.append(transcription)
                 }
             }
+
+            await MainActor.run {
+                let finalWords = confirmedWords.map { $0.word }.joined()
+                confirmedText = finalWords
+
+                // Accept the final hypothesis because it is the last of the available audio
+                let lastHypothesis = lastAgreedWords + findLongestDifferentSuffix(prevWords, hypothesisWords)
+                hypothesisText = lastHypothesis.map { $0.word }.joined()
+            }
         } catch {
             Logging.error("[EagerMode] Error: \(error)")
-        }
-
-        await MainActor.run {
-            let finalWords = confirmedWords.map { $0.word }.joined()
-            confirmedText = finalWords
-
-            // Accept the final hypothesis because it is the last of the available audio
-            let lastHypothesis = lastAgreedWords + findLongestDifferentSuffix(prevWords, hypothesisWords)
-            hypothesisText = lastHypothesis.map { $0.word }.joined()
+            finalizeText()
         }
 
         let mergedResult = mergeTranscriptionResults(eagerResults, confirmedWords: confirmedWords)

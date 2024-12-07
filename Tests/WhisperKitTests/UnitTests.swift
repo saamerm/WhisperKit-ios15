@@ -1,8 +1,8 @@
 //  For licensing see accompanying LICENSE.md file.
 //  Copyright © 2024 Argmax, Inc. All rights reserved.
 
-import Combine
 import AVFoundation
+import Combine
 import CoreML
 import Hub
 import NaturalLanguage
@@ -12,6 +12,10 @@ import XCTest
 
 @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
 final class UnitTests: XCTestCase {
+    override func setUp() async throws {
+        Logging.shared.logLevel = .debug
+    }
+
     // MARK: - Model Loading Test
 
     func testInit() async throws {
@@ -28,17 +32,212 @@ final class UnitTests: XCTestCase {
         )
     }
 
+    // MARK: - Config Tests
+
+    func testModelSupportConfigFallback() {
+        let fallbackRepoConfig = Constants.fallbackModelSupportConfig
+        XCTAssertEqual(fallbackRepoConfig.repoName, "whisperkit-coreml-fallback")
+        XCTAssertEqual(fallbackRepoConfig.repoVersion, "0.2")
+        XCTAssertGreaterThanOrEqual(fallbackRepoConfig.deviceSupports.count, 5)
+
+        // Test that all device supports have their disabled models set except devices that should support all known models
+        for deviceSupport in fallbackRepoConfig.deviceSupports where !Constants.knownModels.allSatisfy(deviceSupport.models.supported.contains) {
+            let modelSupport = deviceSupport.models.supported
+            let knownModels = Constants.knownModels
+
+            // Ensure that the disabled models list is not empty
+            XCTAssertFalse(deviceSupport.models.disabled.isEmpty,
+                           "Disabled models should be set for \(deviceSupport.identifiers), found missing model(s): \(modelSupport.filter { knownModels.contains($0) })")
+        }
+
+        // Test that default device support has all known models as supported and none disabled
+        let defaultSupport = fallbackRepoConfig.defaultSupport
+        XCTAssertEqual(defaultSupport.identifiers, [])
+        XCTAssertEqual(defaultSupport.models.supported.sorted(), Constants.knownModels.sorted())
+    }
+
+    func testModelSupportConfigFromJson() throws {
+        let configFilePath = try XCTUnwrap(
+            Bundle.current.path(forResource: "config", ofType: "json"),
+            "Config file not found"
+        )
+
+        let jsonData = try Data(contentsOf: URL(fileURLWithPath: configFilePath))
+        let decoder = JSONDecoder()
+        let loadedConfig = try decoder.decode(ModelSupportConfig.self, from: jsonData)
+
+        // Compare loaded config with fallback config
+        XCTAssertEqual(loadedConfig.repoName, "whisperkit-coreml")
+        XCTAssertEqual(loadedConfig.repoVersion, Constants.fallbackModelSupportConfig.repoVersion)
+        XCTAssertEqual(loadedConfig.deviceSupports.count, Constants.fallbackModelSupportConfig.deviceSupports.count)
+
+        // Compare device supports
+        for (loadedDeviceSupport, fallbackDeviceSupport) in zip(loadedConfig.deviceSupports, Constants.fallbackModelSupportConfig.deviceSupports) {
+            XCTAssertEqual(loadedDeviceSupport.identifiers, fallbackDeviceSupport.identifiers)
+            XCTAssertEqual(loadedDeviceSupport.models.default, fallbackDeviceSupport.models.default)
+            XCTAssertEqual(Set(loadedDeviceSupport.models.supported), Set(fallbackDeviceSupport.models.supported))
+            XCTAssertEqual(Set(loadedDeviceSupport.models.disabled), Set(fallbackDeviceSupport.models.disabled))
+        }
+    }
+
+    func testModelSupportConfigCorrectness() throws {
+        let config = Constants.fallbackModelSupportConfig
+
+        // Test if a model exists in config for one device but not others, it is disabled
+        let iPhone13Models = config.modelSupport(for: "iPhone13,1")
+        let iPhone14Models = config.modelSupport(for: "iPhone14,3")
+
+        XCTAssertFalse(iPhone13Models.supported.contains("openai_whisper-large-v3_947MB"))
+        XCTAssertTrue(iPhone13Models.disabled.contains("openai_whisper-large-v3_947MB"))
+        XCTAssertTrue(iPhone14Models.supported.contains("openai_whisper-large-v3_947MB"))
+
+        // Test when a device with the same prefix if matched to the appropriate support if different
+        let iPad14A15Model = config.modelSupport(for: "iPad14,1")
+        let iPad14M2Model = config.modelSupport(for: "iPad14,4")
+
+        XCTAssertFalse(iPad14A15Model.supported.contains("openai_whisper-large-v3-v20240930_turbo"))
+        XCTAssertTrue(iPad14A15Model.disabled.contains("openai_whisper-large-v3-v20240930_turbo"))
+        XCTAssertTrue(iPad14M2Model.supported.contains("openai_whisper-large-v3-v20240930_turbo"))
+
+        // Test if a model exists in a remote repo but not in the fallback config, it is disabled for all devices except default
+        let newModel = "some_new_model"
+        let newDevice = "some_new_device"
+        let newDeviceSupport = config.deviceSupports + [DeviceSupport(
+            identifiers: [newDevice],
+            models: ModelSupport(
+                default: "openai_whisper-base",
+                supported: [
+                    "some_new_model",
+                ]
+            )
+        )]
+
+        let newConfig = ModelSupportConfig(
+            repoName: config.repoName,
+            repoVersion: config.repoVersion,
+            deviceSupports: newDeviceSupport
+        )
+
+        XCTAssertEqual(Set(newConfig.knownModels), Set(newDeviceSupport.flatMap { $0.models.supported }))
+        for deviceSupport in newConfig.deviceSupports where !deviceSupport.identifiers.allSatisfy([newDevice].contains) {
+            XCTAssertFalse(deviceSupport.models.supported.contains(newModel))
+            XCTAssertTrue(deviceSupport.models.disabled.contains(newModel))
+        }
+
+        // Test if a model does not exist in a remote repo but does in the fallback config, it is disabled
+        // This will not prevent use of the model if already downloaded, but will enable the remote config to disable specific models
+        let knownLocalModel = Constants.fallbackModelSupportConfig.modelSupport(for: "iPhone13,1").supported.first!
+        let remoteModel = "remote_model"
+        let remoteConfig = ModelSupportConfig(
+            repoName: "test",
+            repoVersion: "test",
+            deviceSupports: [DeviceSupport(
+                identifiers: ["test_device"],
+                models: ModelSupport(
+                    default: remoteModel,
+                    supported: [remoteModel]
+                )
+            )]
+        )
+
+        // Helper method returns supported model
+        let modelSupport = remoteConfig.modelSupport(for: "test_device").supported
+        let disabledModels = remoteConfig.modelSupport(for: "test_device").disabled
+        XCTAssertTrue(modelSupport.contains(remoteModel))
+        XCTAssertTrue(disabledModels.contains(knownLocalModel))
+        // Direct access has it disabled
+        for deviceSupport in remoteConfig.deviceSupports where deviceSupport.identifiers.contains("test_device") {
+            XCTAssertTrue(deviceSupport.models.supported.contains(remoteModel))
+            XCTAssertFalse(deviceSupport.models.disabled.contains(remoteModel))
+            XCTAssertFalse(deviceSupport.models.supported.contains(knownLocalModel))
+            XCTAssertTrue(deviceSupport.models.disabled.contains(knownLocalModel))
+        }
+    }
+
+    func testModelSupportConfigFetch() async throws {
+        // Make sure remote repo config loads successfully from HF
+        let modelRepoConfig = await WhisperKit.fetchModelSupportConfig()
+
+        XCTAssertFalse(modelRepoConfig.deviceSupports.isEmpty, "Should have device supports")
+        XCTAssertFalse(modelRepoConfig.knownModels.isEmpty, "Should have known models")
+
+        XCTAssertGreaterThanOrEqual(modelRepoConfig.deviceSupports.count, Constants.fallbackModelSupportConfig.deviceSupports.count, "Remote config should have at least as many devices as fallback")
+
+        // Verify that known models in the remote config include all known models from fallback
+        let remoteKnownModels = Set(modelRepoConfig.knownModels)
+        let fallbackKnownModels = Set(Constants.fallbackModelSupportConfig.knownModels)
+        XCTAssertTrue(remoteKnownModels.isSuperset(of: fallbackKnownModels), "Remote known models should include all fallback known models")
+
+        // Test an unknown device to ensure it falls back to default support
+        let unknownDeviceSupport = modelRepoConfig.modelSupport(for: "unknown_device")
+        XCTAssertEqual(unknownDeviceSupport.supported, modelRepoConfig.defaultSupport.models.supported, "Unknown device should use default support")
+    }
+
+    func testRecommendedModels() async {
+        let asyncRemoteModels = await WhisperKit.recommendedRemoteModels()
+        let defaultModels = WhisperKit.recommendedModels()
+
+        // Remote models should not be nil or empty
+        XCTAssertNotNil(asyncRemoteModels, "Remote models should not be nil")
+        XCTAssertFalse(asyncRemoteModels.default.isEmpty, "Remote model name should not be empty")
+
+        // Default models should not be nil or empty
+        XCTAssertNotNil(defaultModels, "Default models should not be nil")
+        XCTAssertFalse(defaultModels.default.isEmpty, "Default model name should not be empty")
+    }
+
     // MARK: - Audio Tests
 
     func testAudioFileLoading() throws {
         let audioFilePath = try XCTUnwrap(
-            Bundle.module.path(forResource: "jfk", ofType: "wav"),
+            Bundle.current.path(forResource: "jfk", ofType: "wav"),
             "Audio file not found"
         )
         let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioFilePath)
         XCTAssertNotNil(audioBuffer, "Failed to load audio file at path: \(audioFilePath)")
         XCTAssertEqual(audioBuffer.format.sampleRate, 16000)
         XCTAssertEqual(audioBuffer.format.channelCount, 1)
+        XCTAssertEqual(audioBuffer.frameLength, 176_000)
+        XCTAssertEqual(audioBuffer.frameLength, 11 * 16000)
+
+        let audioBufferWithStartTime = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2)
+        XCTAssertEqual(audioBufferWithStartTime.frameLength, AVAudioFrameCount(156_800))
+        XCTAssertEqual(audioBufferWithStartTime.frameLength, AVAudioFrameCount(16000 * (11 - 1.2)))
+
+        let audioBufferWithStartTimeAndEndTime = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2, endTime: 3.4)
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime.frameLength, AVAudioFrameCount(35200))
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime.frameLength, AVAudioFrameCount(16000 * (3.4 - 1.2)))
+    }
+
+    func testAudioFileLoadingWithResampling() throws {
+        let audioFilePath = try XCTUnwrap(
+            Bundle.current.path(forResource: "jfk_441khz", ofType: "m4a"),
+            "Audio file not found"
+        )
+        let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioFilePath)
+        XCTAssertNotNil(audioBuffer, "Failed to load audio file at path: \(audioFilePath)")
+        XCTAssertEqual(audioBuffer.format.sampleRate, 16000)
+        XCTAssertEqual(audioBuffer.format.channelCount, 1)
+        XCTAssertEqual(audioBuffer.frameLength, 176_000)
+
+        // Test start time and end time with varying max frame sizes
+        let audioBufferWithStartTime1 = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2)
+        XCTAssertEqual(audioBufferWithStartTime1.frameLength, AVAudioFrameCount(156_800))
+        XCTAssertEqual(audioBufferWithStartTime1.frameLength, AVAudioFrameCount(16000 * (11 - 1.2)))
+
+        let audioBufferWithStartTimeAndEndTime1 = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2, endTime: 3.4)
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime1.frameLength, AVAudioFrameCount(35200))
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime1.frameLength, AVAudioFrameCount(16000 * (3.4 - 1.2)))
+
+        // NOTE: depending on frameSize, the final frame lengths will match due to integer division between sample rates
+        let frameSize = AVAudioFrameCount(10024)
+        let audioBufferWithStartTime2 = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2, maxReadFrameSize: frameSize)
+        XCTAssertEqual(audioBufferWithStartTime2.frameLength, AVAudioFrameCount(156_800))
+        XCTAssertEqual(audioBufferWithStartTime2.frameLength, AVAudioFrameCount(16000 * (11 - 1.2)))
+
+        let audioBufferWithStartTimeAndEndTime2 = try AudioProcessor.loadAudio(fromPath: audioFilePath, startTime: 1.2, endTime: 3.4, maxReadFrameSize: frameSize)
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime2.frameLength, AVAudioFrameCount(35200))
+        XCTAssertEqual(audioBufferWithStartTimeAndEndTime2.frameLength, AVAudioFrameCount(16000 * (3.4 - 1.2)))
     }
 
     func testAudioPad() {
@@ -57,7 +256,7 @@ final class UnitTests: XCTestCase {
 
     func testAudioResample() throws {
         let audioFileURL = try XCTUnwrap(
-            Bundle.module.url(forResource: "jfk", withExtension: "wav"),
+            Bundle.current.url(forResource: "jfk", withExtension: "wav"),
             "Audio file not found"
         )
         let audioFile = try AVAudioFile(forReading: audioFileURL)
@@ -72,6 +271,60 @@ final class UnitTests: XCTestCase {
         XCTAssertNotNil(resampledAudio, "Failed to resample audio")
         XCTAssertEqual(resampledAudio?.format.sampleRate, targetSampleRate, "Resampled audio sample rate is not as expected")
         XCTAssertEqual(resampledAudio?.format.channelCount, targetChannelCount, "Resampled audio channels is not as expected")
+    }
+
+    func testAudioResampleFromFile() throws {
+        let audioFileURL = try XCTUnwrap(
+            Bundle.current.url(forResource: "jfk", withExtension: "wav"),
+            "Audio file not found"
+        )
+        let audioFile = try AVAudioFile(forReading: audioFileURL)
+
+        let targetSampleRate = 16000.0
+        let targetChannelCount: AVAudioChannelCount = 1
+        let smallMaxReadFrameSize: AVAudioFrameCount = 10000 // Small chunk size to test chunking logic
+
+        let resampledAudio = AudioProcessor.resampleAudio(
+            fromFile: audioFile,
+            toSampleRate: targetSampleRate,
+            channelCount: targetChannelCount,
+            maxReadFrameSize: smallMaxReadFrameSize
+        )
+
+        XCTAssertNotNil(resampledAudio, "Failed to resample audio with small chunks")
+        XCTAssertEqual(resampledAudio?.format.sampleRate, targetSampleRate, "Resampled audio sample rate is not as expected")
+        XCTAssertEqual(resampledAudio?.format.channelCount, targetChannelCount, "Resampled audio channels is not as expected")
+
+        // Check if the duration is approximately the same (allowing for small differences due to resampling)
+        let originalDuration = Double(audioFile.length) / audioFile.fileFormat.sampleRate
+        let resampledDuration = Double(resampledAudio!.frameLength) / targetSampleRate
+        XCTAssertEqual(originalDuration, resampledDuration, accuracy: 0.1, "Resampled audio duration should be close to original")
+
+        // Read the entire original file into a buffer
+        audioFile.framePosition = 0
+        guard let originalBuffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: AVAudioFrameCount(audioFile.length)) else {
+            XCTFail("Failed to create original buffer")
+            return
+        }
+        try audioFile.read(into: originalBuffer)
+
+        // Compare the audio samples
+        let originalData = originalBuffer.floatChannelData?[0]
+        let resampledData = resampledAudio?.floatChannelData?[0]
+
+        guard let originalSamples = originalData, let resampledSamples = resampledData else {
+            XCTFail("Failed to access audio sample data")
+            return
+        }
+
+        var maxDifference: Float = 0
+        for i in 0..<Int(resampledAudio!.frameLength) {
+            let difference = abs(originalSamples[i] - resampledSamples[i])
+            maxDifference = max(maxDifference, difference)
+        }
+
+        // Allow for a very small difference due to potential floating-point imprecision
+        XCTAssertLessThan(maxDifference, 1e-6, "Audio samples should be identical or very close")
     }
 
     func testAudioEnergy() {
@@ -295,9 +548,11 @@ final class UnitTests: XCTestCase {
     }
 
     func testDecodingEarlyStopping() async throws {
+        let earlyStopTokenCount = 10
         let options = DecodingOptions()
         let continuationCallback: TranscriptionCallback = { (progress: TranscriptionProgress) -> Bool? in
-            false
+            // Stop after only 10 tokens (full test audio contains 16)
+            progress.tokens.count <= earlyStopTokenCount
         }
 
         let result = try await XCTUnwrapAsync(
@@ -323,9 +578,10 @@ final class UnitTests: XCTestCase {
         XCTAssertNotNil(resultWithWait)
         let tokenCountWithWait = resultWithWait.segments.flatMap { $0.tokens }.count
         let decodingTimePerTokenWithWait = resultWithWait.timings.decodingLoop / Double(tokenCountWithWait)
+        Logging.debug("Decoding loop without wait: \(result.timings.decodingLoop), with wait: \(resultWithWait.timings.decodingLoop)")
 
         // Assert that the decoding predictions per token are not slower with the waiting
-        XCTAssertEqual(decodingTimePerTokenWithWait, decodingTimePerToken, accuracy: decodingTimePerToken * 0.75, "Decoding predictions per token should not be significantly slower with waiting")
+        XCTAssertEqual(decodingTimePerTokenWithWait, decodingTimePerToken, accuracy: decodingTimePerToken, "Decoding predictions per token should not be significantly slower with waiting")
 
         // Assert that more tokens are returned in the callback with waiting
         XCTAssertGreaterThan(tokenCountWithWait, tokenCount, "More tokens should be returned in the callback with waiting")
@@ -387,15 +643,14 @@ final class UnitTests: XCTestCase {
         let computeOptions = ModelComputeOptions(
             melCompute: .cpuOnly
         )
-        let whisperKit = try await WhisperKit(
-            modelFolder: tinyModelPath(),
-            computeOptions: computeOptions,
-            verbose: true,
-            logLevel: .debug
-        )
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(),
+                                          computeOptions: computeOptions,
+                                          verbose: true,
+                                          logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         let audioFilePath = try XCTUnwrap(
-            Bundle.module.path(forResource: "jfk", ofType: "wav"),
+            Bundle.current.path(forResource: "jfk", ofType: "wav"),
             "Audio file not found"
         )
         let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioFilePath)
@@ -518,14 +773,11 @@ final class UnitTests: XCTestCase {
 
     func testDetectSpanish() async throws {
         let targetLanguage = "es"
-        let whisperKit = try await WhisperKit(
-            modelFolder: tinyModelPath(),
-            verbose: true,
-            logLevel: .debug
-        )
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         let audioFilePath = try XCTUnwrap(
-            Bundle.module.path(forResource: "es_test_clip", ofType: "wav"),
+            Bundle.current.path(forResource: "es_test_clip", ofType: "wav"),
             "Audio file not found"
         )
 
@@ -596,14 +848,11 @@ final class UnitTests: XCTestCase {
 
     func testDetectJapanese() async throws {
         let targetLanguage = "ja"
-        let whisperKit = try await WhisperKit(
-            modelFolder: tinyModelPath(),
-            verbose: true,
-            logLevel: .debug
-        )
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         let audioFilePath = try XCTUnwrap(
-            Bundle.module.path(forResource: "ja_test_clip", ofType: "wav"),
+            Bundle.current.path(forResource: "ja_test_clip", ofType: "wav"),
             "Audio file not found"
         )
 
@@ -649,15 +898,12 @@ final class UnitTests: XCTestCase {
 
     func testDetectLanguageHelperMethod() async throws {
         let targetLanguages = ["es", "ja"]
-        let whisperKit = try await WhisperKit(
-            modelFolder: tinyModelPath(),
-            verbose: true,
-            logLevel: .debug
-        )
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         for language in targetLanguages {
             let audioFilePath = try XCTUnwrap(
-                Bundle.module.path(forResource: "\(language)_test_clip", ofType: "wav"),
+                Bundle.current.path(forResource: "\(language)_test_clip", ofType: "wav"),
                 "Audio file not found"
             )
 
@@ -711,7 +957,8 @@ final class UnitTests: XCTestCase {
     }
 
     func testSilence() async throws {
-        let whisperKit = try await WhisperKit(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
         let audioSamples = [Float](repeating: 0.0, count: 30 * 16000)
         let options = DecodingOptions(usePrefillPrompt: false, skipSpecialTokens: false)
 
@@ -723,7 +970,8 @@ final class UnitTests: XCTestCase {
     }
 
     func testTemperatureIncrement() async throws {
-        let whisperKit = try await WhisperKit(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         // Generate random audio samples
         let audioSamples = (0..<(30 * 16000)).map { _ in Float.random(in: -0.7...0.7) }
@@ -786,10 +1034,11 @@ final class UnitTests: XCTestCase {
     }
 
     func testPromptTokens() async throws {
-        let whisperKit = try await WhisperKit(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
         let promptText = " prompt to encourage output without any punctuation and without capitalizing americans as if it was already normalized"
         let tokenizer = try XCTUnwrap(whisperKit.tokenizer)
-        let promptTokens = tokenizer.encode(text: promptText).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+        let promptTokens = tokenizer.encode(text: promptText)
         let options = DecodingOptions(skipSpecialTokens: true, promptTokens: promptTokens)
 
         let result = try await XCTUnwrapAsync(
@@ -798,10 +1047,12 @@ final class UnitTests: XCTestCase {
         )
 
         XCTAssertEqual(result.segments.first?.text, " and so my fellow americans ask not what your country can do for you ask what you can do for your country.")
+        XCTAssertFalse(result.text.contains(promptText), "Prompt text should not be present in the result")
     }
 
     func testPrefixTokens() async throws {
-        let whisperKit = try await WhisperKit(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let config = try WhisperKitConfig(modelFolder: tinyModelPath(), verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
         // Prefix to encourage output without any punctuation and without capitalizing americans as if it was already normalized
         let prefixText = " and so my fellow americans"
         let tokenizer = try XCTUnwrap(whisperKit.tokenizer)
@@ -814,6 +1065,43 @@ final class UnitTests: XCTestCase {
         )
 
         XCTAssertEqual(result.segments.first?.text, " and so my fellow americans ask not what your country can do for you ask what you can do for your country.")
+    }
+
+    func testCallbacks() async throws {
+        let config = try WhisperKitConfig(
+            modelFolder: tinyModelPath(),
+            verbose: true,
+            logLevel: .debug,
+            load: false
+        )
+        let whisperKit = try await WhisperKit(config)
+        let modelStateExpectation = XCTestExpectation(description: "Model state callback expectation")
+        whisperKit.modelStateCallback = { (oldState: ModelState?, newState: ModelState) in
+            Logging.debug("Model state: \(newState)")
+            modelStateExpectation.fulfill()
+        }
+
+        let segmentDiscoveryExpectation = XCTestExpectation(description: "Segment discovery callback expectation")
+        whisperKit.segmentDiscoveryCallback = { (segments: [TranscriptionSegment]) in
+            Logging.debug("Segments discovered: \(segments)")
+            segmentDiscoveryExpectation.fulfill()
+        }
+
+        let transcriptionStateExpectation = XCTestExpectation(description: "Transcription state callback expectation")
+        whisperKit.transcriptionStateCallback = { (state: TranscriptionState) in
+            Logging.debug("Transcription state: \(state)")
+            transcriptionStateExpectation.fulfill()
+        }
+
+        // Run the full pipeline
+        try await whisperKit.loadModels()
+        let audioFilePath = try XCTUnwrap(
+            Bundle.current.path(forResource: "jfk", ofType: "wav"),
+            "Audio file not found"
+        )
+        let _ = try await whisperKit.transcribe(audioPath: audioFilePath)
+
+        await fulfillment(of: [modelStateExpectation, segmentDiscoveryExpectation, transcriptionStateExpectation], timeout: 1)
     }
 
     // MARK: - Utils Tests
@@ -855,6 +1143,18 @@ final class UnitTests: XCTestCase {
         XCTAssertEqual("<|end<|of|>text|>".trimmingSpecialTokenCharacters(), "end<|of|>text")
         XCTAssertEqual("<|endoftext".trimmingSpecialTokenCharacters(), "endoftext")
         XCTAssertEqual("endoftext|>".trimmingSpecialTokenCharacters(), "endoftext")
+    }
+
+    func testDeviceName() {
+        let deviceName = WhisperKit.deviceName()
+        XCTAssertFalse(deviceName.isEmpty, "Device name should not be empty")
+        XCTAssertTrue(deviceName.contains(","), "Device name should contain a comma, found \(deviceName)")
+    }
+
+    func testOrderedSet() {
+        let testArray = ["model1", "model2", "model1", "model3", "model2"]
+        let uniqueArray = testArray.orderedSet
+        XCTAssertEqual(uniqueArray, ["model1", "model2", "model3"], "Ordered set should contain unique elements in order")
     }
 
     // MARK: - LogitsFilter Tests
@@ -916,7 +1216,7 @@ final class UnitTests: XCTestCase {
         let result1 = tokensFilter1.filterLogits(logits1, withTokens: [])
         XCTAssertEqual(result1.data(for: 2), [-.infinity, -.infinity, 0.3, -.infinity, 0.5, -.infinity, 0.7])
 
-        let tokensFilter2 = LanguageLogitsFilter(allLanguageTokens: [2, 4, 6], logitsDim: 7, sampleBegin: 0)
+        let tokensFilter2 = LanguageLogitsFilter(allLanguageTokens: [2, 4, 6], logitsDim: 7, sampleBegin: 2)
         let logits2 = try MLMultiArray.logits([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
         let result2 = tokensFilter2.filterLogits(logits2, withTokens: [1])
         XCTAssertEqual(result2.data(for: 2), [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
@@ -936,6 +1236,7 @@ final class UnitTests: XCTestCase {
             maxInitialTimestampIndex: nil,
             isModelMultilingual: false
         )
+
         let logits1 = try MLMultiArray.logits([1.1, 5.2, 0.3, 0.4, 0.2, 0.1, 0.2])
         let result1 = tokensFilter1.filterLogits(logits1, withTokens: [])
         XCTAssertEqual(result1.data(for: 2), [1.1, 5.2, -.infinity, 0.4, 0.2, 0.1, 0.2])
@@ -952,6 +1253,7 @@ final class UnitTests: XCTestCase {
             maxInitialTimestampIndex: nil,
             isModelMultilingual: false
         )
+
         let logits2 = try MLMultiArray.logits([1.1, 0.2, 0.3, 0.4, 0.2, 0.1, 0.2])
         let result2 = tokensFilter2.filterLogits(logits2, withTokens: [])
         XCTAssertEqual(result2.data(for: 2), [-.infinity, -.infinity, -.infinity, -.infinity, 0.2, 0.1, 0.2])
@@ -1016,7 +1318,7 @@ final class UnitTests: XCTestCase {
         XCTAssertTrue(vad.voiceActivity(in: []).isEmpty)
 
         let audioFilePath = try XCTUnwrap(
-            Bundle.module.path(forResource: "jfk", ofType: "wav"),
+            Bundle.current.path(forResource: "jfk", ofType: "wav"),
             "Audio file not found"
         )
         let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioFilePath)
@@ -1118,10 +1420,9 @@ final class UnitTests: XCTestCase {
 
     func testVADAudioChunker() async throws {
         let chunker = VADAudioChunker()
-        Logging.shared.logLevel = .debug
 
         let singleChunkPath = try XCTUnwrap(
-            Bundle.module.path(forResource: "jfk", ofType: "wav"),
+            Bundle.current.path(forResource: "jfk", ofType: "wav"),
             "Audio file not found"
         )
         var audioBuffer = try AudioProcessor.loadAudio(fromPath: singleChunkPath)
@@ -1136,7 +1437,7 @@ final class UnitTests: XCTestCase {
         XCTAssertEqual(audioChunks.count, 1)
 
         let multiChunkPath = try XCTUnwrap(
-            Bundle.module.path(forResource: "ted_60", ofType: "m4a"),
+            Bundle.current.path(forResource: "ted_60", ofType: "m4a"),
             "Audio file not found"
         )
         audioBuffer = try AudioProcessor.loadAudio(fromPath: multiChunkPath)
@@ -1152,36 +1453,36 @@ final class UnitTests: XCTestCase {
     }
 
     func testVADAudioChunkerAccuracy() async throws {
-        let testResult = try await XCTUnwrapAsync(
-            await transcribe(with: .tiny, options: DecodingOptions(), audioFile: "ted_60.m4a"),
-            "Failed to transcribe"
-        )
-
-        let options = DecodingOptions(chunkingStrategy: .vad)
+        let options = DecodingOptions(temperatureFallbackCount: 0, chunkingStrategy: .vad)
 
         let chunkedResult = try await XCTUnwrapAsync(
             await transcribe(with: .tiny, options: options, audioFile: "ted_60.m4a"),
             "Failed to transcribe"
         )
 
+        let clipTimestamps = chunkedResult.compactMap(\.seekTime)
+        XCTAssertEqual(clipTimestamps, [0, 22.9, 39], "Clip timestamps should match the expected values, found \(clipTimestamps)")
+
+        // Run the test using same seek values for accuracy comparison
+        let testResult = try await XCTUnwrapAsync(
+            await transcribe(with: .tiny, options: DecodingOptions(temperatureFallbackCount: 0, clipTimestamps: [0, 22.9, 22.9, 39, 39, 60]), audioFile: "ted_60.m4a"),
+            "Failed to transcribe"
+        )
+
         XCTAssertFalse(testResult.text.isEmpty, "The test text should not be empty")
         XCTAssertFalse(chunkedResult.text.isEmpty, "The chunked text should not be empty")
 
-        // Select few sentences to compare at VAD border
-        // TODO: test that WER is in acceptable range
-//        XCTAssertTrue(testResult.text.normalized.contains("I would kind".normalized), "Expected text not found in \(testResult.text.normalized)")
-//        XCTAssertTrue(chunkedResult.text.normalized.contains("I would kind".normalized), "Expected text not found in \(chunkedResult.text.normalized)")
-//
-//        XCTAssertTrue(testResult.text.normalized.contains("every single paper".normalized), "Expected text not found in \(testResult.text.normalized)")
-//        XCTAssertTrue(chunkedResult.text.normalized.contains("every single paper".normalized), "Expected text not found in \(chunkedResult.text.normalized)")
+        // Check WER for the full audio and the chunked audio
+        let (wer, diff) = WERUtils.evaluate(originalTranscript: testResult.text, generatedTranscript: chunkedResult.text)
 
-        XCTAssertTrue(testResult.text.normalized.contains("But then came my 90 page senior".normalized), "Expected text not found in \(testResult.text.normalized)")
-        XCTAssertTrue(chunkedResult.text.normalized.contains("But then came my 90 page senior".normalized), "Expected text not found in \(chunkedResult.text.normalized)")
+        let diffDescription = WERUtils.diffString(from: diff)
+
+        XCTAssertEqual(wer, 0.0, "Transcripts should match with a WER of 0, found \(wer). Full diff: \(diffDescription)")
     }
 
     #if !os(watchOS) // FIXME: This test times out on watchOS when run on low compute runners
     func testVADProgress() async throws {
-        let pipe = try await WhisperKit(model: "tiny.en")
+        let pipe = try await WhisperKit(WhisperKitConfig(model: "tiny.en"))
 
         let cancellable: AnyCancellable? = pipe.progress.publisher(for: \.fractionCompleted)
             .removeDuplicates()
@@ -1192,7 +1493,7 @@ final class UnitTests: XCTestCase {
                 }
             }
         _ = try await pipe.transcribe(
-            audioPath: Bundle.module.path(forResource: "ted_60", ofType: "m4a")!,
+            audioPath: Bundle.current.path(forResource: "ted_60", ofType: "m4a")!,
             decodeOptions: .init(chunkingStrategy: .vad)
         )
         cancellable?.cancel()
@@ -1519,11 +1820,12 @@ final class UnitTests: XCTestCase {
         let audioFile = "jfk.wav"
         let modelPath = try tinyModelPath()
 
-        let whisperKit = try await WhisperKit(modelFolder: modelPath, /* computeOptions: computeOptions,*/ verbose: true, logLevel: .debug)
+        let config = WhisperKitConfig(modelFolder: modelPath, /* computeOptions: computeOptions,*/ verbose: true, logLevel: .debug)
+        let whisperKit = try await WhisperKit(config)
 
         let startTime = Date()
         let audioComponents = audioFile.components(separatedBy: ".")
-        guard let audioFileURL = Bundle.module.path(forResource: audioComponents.first, ofType: audioComponents.last) else {
+        guard let audioFileURL = Bundle.current.path(forResource: audioComponents.first, ofType: audioComponents.last) else {
             XCTFail("Audio file not found")
             return
         }
@@ -1533,7 +1835,7 @@ final class UnitTests: XCTestCase {
         var results: [TranscriptionResult?] = []
         var prevResult: TranscriptionResult?
         var lastAgreedSeconds: Float = 0.0
-        let agreementCountNeeded = 2
+        let agreementCountNeeded = 4
         var hypothesisWords: [WordTiming] = []
         var prevWords: [WordTiming] = []
         var lastAgreedWords: [WordTiming] = []

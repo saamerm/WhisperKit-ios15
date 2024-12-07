@@ -38,10 +38,8 @@ struct TranscribeCLI: AsyncParsableCommand {
             cliArguments.audioPath = audioFiles.map { audioFolder + "/" + $0 }
         }
 
-        if let chunkingStrategyRaw = cliArguments.chunkingStrategy {
-            if ChunkingStrategy(rawValue: chunkingStrategyRaw) == nil {
-                throw ValidationError("Wrong chunking strategy \"\(chunkingStrategyRaw)\", valid strategies: \(ChunkingStrategy.allCases.map { $0.rawValue })")
-            }
+        if ChunkingStrategy(rawValue: cliArguments.chunkingStrategy) == nil {
+            throw ValidationError("Wrong chunking strategy \"\(cliArguments.chunkingStrategy)\", valid strategies: \(ChunkingStrategy.allCases.map { $0.rawValue })")
         }
     }
 
@@ -82,12 +80,12 @@ struct TranscribeCLI: AsyncParsableCommand {
         }
 
         var options = decodingOptions(task: task)
-        if let promptText = cliArguments.prompt, let tokenizer = whisperKit.tokenizer {
+        if let promptText = cliArguments.prompt, promptText.count > 0, let tokenizer = whisperKit.tokenizer {
             options.promptTokens = tokenizer.encode(text: " " + promptText.trimmingCharacters(in: .whitespaces)).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
             options.usePrefillPrompt = true
         }
 
-        if let prefixText = cliArguments.prefix, let tokenizer = whisperKit.tokenizer {
+        if let prefixText = cliArguments.prefix, prefixText.count > 0, let tokenizer = whisperKit.tokenizer {
             options.prefixTokens = tokenizer.encode(text: " " + prefixText.trimmingCharacters(in: .whitespaces)).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
             options.usePrefillPrompt = true
         }
@@ -304,26 +302,20 @@ struct TranscribeCLI: AsyncParsableCommand {
                 nil
             }
 
-        return try await WhisperKit(
-            model: modelName,
-            downloadBase: downloadModelFolder,
-            modelFolder: cliArguments.modelPath,
-            tokenizerFolder: downloadTokenizerFolder,
-            computeOptions: computeOptions,
-            verbose: cliArguments.verbose,
-            logLevel: .debug,
-            load: true,
-            useBackgroundDownloadSession: false
-        )
+        let config = WhisperKitConfig(model: modelName,
+                                      downloadBase: downloadModelFolder,
+                                      modelFolder: cliArguments.modelPath,
+                                      tokenizerFolder: downloadTokenizerFolder,
+                                      computeOptions: computeOptions,
+                                      verbose: cliArguments.verbose,
+                                      logLevel: .debug,
+                                      prewarm: false,
+                                      load: true,
+                                      useBackgroundDownloadSession: false)
+        return try await WhisperKit(config)
     }
 
     private func decodingOptions(task: DecodingTask) -> DecodingOptions {
-        let chunkingStrategy: ChunkingStrategy? =
-            if let chunkingStrategyRaw = cliArguments.chunkingStrategy {
-                ChunkingStrategy(rawValue: chunkingStrategyRaw)
-            } else {
-                nil
-            }
         return DecodingOptions(
             verbose: cliArguments.verbose,
             task: task,
@@ -344,7 +336,7 @@ struct TranscribeCLI: AsyncParsableCommand {
             firstTokenLogProbThreshold: cliArguments.firstTokenLogProbThreshold,
             noSpeechThreshold: cliArguments.noSpeechThreshold ?? 0.6,
             concurrentWorkerCount: cliArguments.concurrentWorkerCount,
-            chunkingStrategy: chunkingStrategy
+            chunkingStrategy: ChunkingStrategy(rawValue: cliArguments.chunkingStrategy)
         )
     }
 
