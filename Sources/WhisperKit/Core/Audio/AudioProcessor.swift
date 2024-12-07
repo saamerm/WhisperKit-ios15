@@ -20,9 +20,12 @@ public struct AudioDevice: Identifiable, Hashable {
 
 public protocol AudioProcessing {
     /// Loads audio data from a specified file path.
-    /// - Parameter audioFilePath: The file path of the audio file.
+    /// - Parameters:
+    ///   - audioFilePath: The file path of the audio file.
+    ///   - startTime: Optional start time in seconds to read from
+    ///   - endTime: Optional end time in seconds to read until
     /// - Returns: `AVAudioPCMBuffer` containing the audio data.
-    static func loadAudio(fromPath audioFilePath: String) throws -> AVAudioPCMBuffer
+    static func loadAudio(fromPath audioFilePath: String, startTime: Double?, endTime: Double?, maxReadFrameSize: AVAudioFrameCount?) throws -> AVAudioPCMBuffer
 
     /// Loads and converts audio data from a specified file paths.
     /// - Parameter audioPaths: The file paths of the audio files.
@@ -71,6 +74,16 @@ public protocol AudioProcessing {
 
 /// Overrideable default methods for AudioProcessing
 public extension AudioProcessing {
+    /// Loads and converts audio data from a specified file paths.
+    /// - Parameter audioPaths: The file paths of the audio files.
+    /// - Returns: `AVAudioPCMBuffer` containing the audio data.
+    @available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
+    static func loadAudioAsync(fromPath audioFilePath: String) async throws -> AVAudioPCMBuffer {
+        return try await Task {
+            try AudioProcessor.loadAudio(fromPath: audioFilePath)
+        }.value
+    }
+
     func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)?) throws {
         try startRecordingLive(inputDeviceID: inputDeviceID, callback: callback)
     }
@@ -80,9 +93,7 @@ public extension AudioProcessing {
     }
 
     static func padOrTrimAudio(fromArray audioArray: [Float], startAt startIndex: Int = 0, toLength frameLength: Int = 480_000, saveSegment: Bool = false) -> MLMultiArray? {
-        let currentFrameLength = audioArray.count
-
-        if startIndex >= currentFrameLength, startIndex < 0 {
+        guard startIndex >= 0 && startIndex < audioArray.count else {
             Logging.error("startIndex is outside the buffer size")
             return nil
         }
@@ -172,36 +183,114 @@ public class AudioProcessor: NSObject, AudioProcessing {
 
     // MARK: - Loading and conversion
 
-    public static func loadAudio(fromPath audioFilePath: String) throws -> AVAudioPCMBuffer {
+    public static func loadAudio(
+        fromPath audioFilePath: String,
+        startTime: Double? = 0,
+        endTime: Double? = nil,
+        maxReadFrameSize: AVAudioFrameCount? = nil
+    ) throws -> AVAudioPCMBuffer {
         guard FileManager.default.fileExists(atPath: audioFilePath) else {
             throw WhisperError.loadAudioFailed("Resource path does not exist \(audioFilePath)")
         }
 
         let audioFileURL = URL(fileURLWithPath: audioFilePath)
         let audioFile = try AVAudioFile(forReading: audioFileURL, commonFormat: .pcmFormatFloat32, interleaved: false)
+        return try loadAudio(fromFile: audioFile, startTime: startTime, endTime: endTime, maxReadFrameSize: maxReadFrameSize)
+    }
 
+    public static func loadAudio(
+        fromFile audioFile: AVAudioFile,
+        startTime: Double? = 0,
+        endTime: Double? = nil,
+        maxReadFrameSize: AVAudioFrameCount? = nil
+    ) throws -> AVAudioPCMBuffer {
         let sampleRate = audioFile.fileFormat.sampleRate
         let channelCount = audioFile.fileFormat.channelCount
         let frameLength = AVAudioFrameCount(audioFile.length)
 
-        let outputBuffer: AVAudioPCMBuffer
+        // Calculate the frame range based on the start and end seconds
+        let startFrame = AVAudioFramePosition((startTime ?? 0) * sampleRate)
+        let endFrame: AVAudioFramePosition
+        if let end = endTime {
+            endFrame = min(AVAudioFramePosition(end * sampleRate), AVAudioFramePosition(audioFile.length))
+        } else {
+            endFrame = AVAudioFramePosition(audioFile.length)
+        }
+
+        let frameCount = AVAudioFrameCount(endFrame - startFrame)
+
+        // Seek to the start frame
+        audioFile.framePosition = startFrame
+
+        var outputBuffer: AVAudioPCMBuffer?
+
         // If the audio file already meets the desired format, read directly into the output buffer
         if sampleRate == 16000 && channelCount == 1 {
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frameLength) else {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frameCount) else {
                 throw WhisperError.loadAudioFailed("Unable to create audio buffer")
             }
-            try audioFile.read(into: buffer)
+            try audioFile.read(into: buffer, frameCount: frameCount)
             outputBuffer = buffer
         } else {
             // Audio needs resampling to 16khz
-            guard let buffer = resampleAudio(fromFile: audioFile, toSampleRate: 16000, channelCount: 1) else {
-                throw WhisperError.loadAudioFailed("Unable to resample audio")
-            }
-            outputBuffer = buffer
+            let maxReadFrameSize = maxReadFrameSize ?? Constants.defaultAudioReadFrameSize
+            outputBuffer = resampleAudio(fromFile: audioFile, toSampleRate: 16000, channelCount: 1, frameCount: frameCount, maxReadFrameSize: maxReadFrameSize)
         }
-        Logging.debug("Audio source details - Sample Rate: \(sampleRate) Hz, Channel Count: \(channelCount), Frame Length: \(frameLength), Duration: \(Double(frameLength) / sampleRate)s")
-        Logging.debug("Audio buffer details - Sample Rate: \(outputBuffer.format.sampleRate) Hz, Channel Count: \(outputBuffer.format.channelCount), Frame Length: \(outputBuffer.frameLength), Duration: \(Double(outputBuffer.frameLength) / outputBuffer.format.sampleRate)s")
-        return outputBuffer
+
+        if let outputBuffer = outputBuffer {
+            Logging.debug("Audio source details - Sample Rate: \(sampleRate) Hz, Channel Count: \(channelCount), Frame Length: \(frameLength), Duration: \(Double(frameLength) / sampleRate)s")
+            Logging.debug("Audio buffer details - Sample Rate: \(outputBuffer.format.sampleRate) Hz, Channel Count: \(outputBuffer.format.channelCount), Frame Length: \(outputBuffer.frameLength), Duration: \(Double(outputBuffer.frameLength) / outputBuffer.format.sampleRate)s")
+
+            logCurrentMemoryUsage("After loadAudio function")
+
+            return outputBuffer
+        } else {
+            throw WhisperError.loadAudioFailed("Failed to process audio buffer")
+        }
+    }
+
+    public static func loadAudioAsFloatArray(
+        fromPath audioFilePath: String,
+        startTime: Double? = 0,
+        endTime: Double? = nil
+    ) throws -> [Float] {
+        guard FileManager.default.fileExists(atPath: audioFilePath) else {
+            throw WhisperError.loadAudioFailed("Resource path does not exist \(audioFilePath)")
+        }
+
+        let audioFileURL = URL(fileURLWithPath: audioFilePath)
+        let audioFile = try AVAudioFile(forReading: audioFileURL, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let inputSampleRate = audioFile.fileFormat.sampleRate
+        let inputFrameCount = AVAudioFrameCount(audioFile.length)
+        let inputDuration = Double(inputFrameCount) / inputSampleRate
+
+        let start = startTime ?? 0
+        let end = min(endTime ?? inputDuration, inputDuration)
+
+        // Load 10m of audio at a time to reduce peak memory while converting
+        // Particularly impactful for large audio files
+        let chunkDuration: Double = 60 * 10
+        var currentTime = start
+        var result: [Float] = []
+
+        while currentTime < end {
+            let chunkEnd = min(currentTime + chunkDuration, end)
+
+            try autoreleasepool {
+                let buffer = try loadAudio(
+                    fromFile: audioFile,
+                    startTime: currentTime,
+                    endTime: chunkEnd
+                )
+
+                let floatArray = Self.convertBufferToArray(buffer: buffer)
+                result.append(contentsOf: floatArray)
+            }
+
+            currentTime = chunkEnd
+        }
+
+        return result
     }
 
     public static func loadAudio(at audioPaths: [String]) async -> [Result<[Float], Swift.Error>] {
@@ -209,8 +298,7 @@ public class AudioProcessor: NSObject, AudioProcessing {
             for (index, audioPath) in audioPaths.enumerated() {
                 taskGroup.addTask {
                     do {
-                        let audioBuffer = try AudioProcessor.loadAudio(fromPath: audioPath)
-                        let audio = AudioProcessor.convertBufferToArray(buffer: audioBuffer)
+                        let audio = try AudioProcessor.loadAudioAsFloatArray(fromPath: audioPath)
                         return [(index: index, result: .success(audio))]
                     } catch {
                         return [(index: index, result: .failure(error))]
@@ -226,73 +314,142 @@ public class AudioProcessor: NSObject, AudioProcessing {
         }
     }
 
-    public static func resampleAudio(fromFile audioFile: AVAudioFile, toSampleRate sampleRate: Double, channelCount: AVAudioChannelCount) -> AVAudioPCMBuffer? {
-        let newFrameLength = Int64((sampleRate / audioFile.fileFormat.sampleRate) * Double(audioFile.length))
-        let outputFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channelCount)!
-        guard let converter = AVAudioConverter(from: audioFile.processingFormat, to: outputFormat) else {
-            Logging.error("Failed to create audio converter")
+    /// Resamples audio from a file to a specified sample rate and channel count.
+    /// - Parameters:
+    ///   - audioFile: The input audio file.
+    ///   - sampleRate: The desired output sample rate.
+    ///   - channelCount: The desired output channel count.
+    ///   - frameCount: The desired frames to read from the input audio file. (default: all).
+    ///   - maxReadFrameSize: Maximum number of frames to read at once (default: 10 million).
+    /// - Returns: Resampled audio as an AVAudioPCMBuffer, or nil if resampling fails.
+    public static func resampleAudio(
+        fromFile audioFile: AVAudioFile,
+        toSampleRate sampleRate: Double,
+        channelCount: AVAudioChannelCount,
+        frameCount: AVAudioFrameCount? = nil,
+        maxReadFrameSize: AVAudioFrameCount = Constants.defaultAudioReadFrameSize
+    ) -> AVAudioPCMBuffer? {
+        let inputSampleRate = audioFile.fileFormat.sampleRate
+        let inputStartFrame = audioFile.framePosition
+        let inputFrameCount = frameCount ?? AVAudioFrameCount(audioFile.length)
+        let inputDuration = Double(inputFrameCount) / inputSampleRate
+        let endFramePosition = min(inputStartFrame + AVAudioFramePosition(inputFrameCount), audioFile.length + 1)
+
+        guard let outputFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channelCount) else {
+            Logging.error("Failed to create output audio format")
             return nil
         }
 
-        let frameCount = AVAudioFrameCount(audioFile.length)
+        Logging.debug("Resampling \(String(format: "%.2f", inputDuration)) seconds of audio")
 
-        // Read audio in 100mb increments to reduce the memory spike for large audio files
-        let maxReadFrameSize: AVAudioFrameCount = 100_000_000
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: min(frameCount, maxReadFrameSize)),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(newFrameLength))
-        else {
-            Logging.error("Unable to create buffers, likely due to unsupported file format")
+        // Create the output buffer with full capacity
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(inputDuration * outputFormat.sampleRate)) else {
+            Logging.error("Failed to create output buffer")
             return nil
         }
 
-        while audioFile.framePosition < frameCount {
+        let inputBuffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: maxReadFrameSize)!
+        var nextPosition = inputStartFrame
+        while nextPosition < endFramePosition {
+            let framePosition = audioFile.framePosition
+            let remainingFrames = AVAudioFrameCount(endFramePosition - framePosition)
+            let framesToRead = min(remainingFrames, maxReadFrameSize)
+            nextPosition = framePosition + Int64(framesToRead)
+
+            let currentPositionInSeconds = Double(framePosition) / inputSampleRate
+            let nextPositionInSeconds = Double(nextPosition) / inputSampleRate
+            Logging.debug("Resampling \(String(format: "%.2f", currentPositionInSeconds))s - \(String(format: "%.2f", nextPositionInSeconds))s")
+
             do {
-                let maxReadFrameCount = min(frameCount - UInt32(audioFile.framePosition), maxReadFrameSize)
-                try audioFile.read(into: inputBuffer, frameCount: maxReadFrameCount)
+                try audioFile.read(into: inputBuffer, frameCount: framesToRead)
+                guard let resampledChunk = resampleAudio(fromBuffer: inputBuffer,
+                                                         toSampleRate: outputFormat.sampleRate,
+                                                         channelCount: outputFormat.channelCount)
+                else {
+                    Logging.error("Failed to resample audio chunk")
+                    return nil
+                }
+
+                // Append the resampled chunk to the output buffer
+                guard outputBuffer.appendContents(of: resampledChunk) else {
+                    Logging.error("Failed to append audio chunk")
+                    return nil
+                }
             } catch {
                 Logging.error("Error reading audio file: \(error)")
                 return nil
-            }
-
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                if inputBuffer.frameLength == 0 {
-                    outStatus.pointee = .endOfStream
-                    return nil
-                } else {
-                    outStatus.pointee = .haveData
-                    return inputBuffer
-                }
-            }
-
-            var error: NSError?
-            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-            switch status {
-            case .error:
-                if let conversionError = error {
-                    Logging.error("Error converting audio file: \(conversionError)")
-                }
-                return nil
-            default: break
             }
         }
 
         return outputBuffer
     }
 
+    /// Resamples an audio buffer to a specified sample rate and channel count.
+    /// - Parameters:
+    ///   - inputBuffer: The input audio buffer.
+    ///   - sampleRate: The desired output sample rate.
+    ///   - channelCount: The desired output channel count.
+    /// - Returns: Resampled audio as an AVAudioPCMBuffer, or nil if resampling fails.
+    public static func resampleAudio(fromBuffer inputBuffer: AVAudioPCMBuffer, toSampleRate sampleRate: Double, channelCount: AVAudioChannelCount) -> AVAudioPCMBuffer? {
+        guard let outputFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channelCount) else {
+            Logging.error("Failed to create output audio format")
+            return nil
+        }
+
+        guard let converter = AVAudioConverter(from: inputBuffer.format, to: outputFormat) else {
+            Logging.error("Failed to create audio converter")
+            return nil
+        }
+
+        do {
+            return try Self.resampleBuffer(inputBuffer, with: converter)
+        } catch {
+            Logging.error("Failed to resample buffer: \(error)")
+            return nil
+        }
+    }
+
+    /// Resamples an audio buffer using the provided converter.
+    /// - Parameters:
+    ///   - buffer: The input audio buffer.
+    ///   - converter: The audio converter to use for resampling.
+    /// - Returns: Resampled audio as an AVAudioPCMBuffer.
+    /// - Throws: WhisperError if resampling fails.
     public static func resampleBuffer(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter) throws -> AVAudioPCMBuffer {
+        var capacity = converter.outputFormat.sampleRate * Double(buffer.frameLength) / converter.inputFormat.sampleRate
+
+        // Check if the capacity is a whole number
+        if capacity.truncatingRemainder(dividingBy: 1) != 0 {
+            // Round to the nearest whole number
+            let roundedCapacity = capacity.rounded(.toNearestOrEven)
+            Logging.debug("Rounding buffer frame capacity from \(capacity) to \(roundedCapacity) to better fit new sample rate")
+            capacity = roundedCapacity
+        }
+
         guard let convertedBuffer = AVAudioPCMBuffer(
             pcmFormat: converter.outputFormat,
-            frameCapacity: AVAudioFrameCount(converter.outputFormat.sampleRate * Double(buffer.frameLength) / converter.inputFormat.sampleRate)
+            frameCapacity: AVAudioFrameCount(capacity)
         ) else {
             throw WhisperError.audioProcessingFailed("Failed to create converted buffer")
         }
 
         let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-            outStatus.pointee = .haveData
-            return buffer
+            if buffer.frameLength == 0 {
+                outStatus.pointee = .endOfStream
+                return nil
+            } else {
+                outStatus.pointee = .haveData
+                return buffer
+            }
         }
 
-        converter.convert(to: convertedBuffer, error: nil, withInputFrom: inputBlock)
+        var error: NSError?
+        let status = converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+
+        if status == .error, let conversionError = error {
+            throw WhisperError.audioProcessingFailed("Error converting audio: \(conversionError)")
+        }
+
         return convertedBuffer
     }
 
@@ -412,11 +569,42 @@ public class AudioProcessor: NSObject, AudioProcessing {
         return max(0, min(normalizedEnergy, 1))
     }
 
-    public static func convertBufferToArray(buffer: AVAudioPCMBuffer) -> [Float] {
-        let start = buffer.floatChannelData?[0]
-        let count = Int(buffer.frameLength)
-        let convertedArray = Array(UnsafeBufferPointer(start: start, count: count))
-        return convertedArray
+    public static func convertBufferToArray(buffer: AVAudioPCMBuffer, chunkSize: Int = 1024) -> [Float] {
+        guard let channelData = buffer.floatChannelData else {
+            return []
+        }
+
+        let frameLength = Int(buffer.frameLength)
+        let startPointer = channelData[0]
+
+        var result: [Float] = []
+        result.reserveCapacity(frameLength) // Reserve the capacity to avoid multiple allocations
+
+        var currentFrame = 0
+        while currentFrame < frameLength {
+            let remainingFrames = frameLength - currentFrame
+            let currentChunkSize = min(chunkSize, remainingFrames)
+
+            var chunk = [Float](repeating: 0, count: currentChunkSize)
+
+            chunk.withUnsafeMutableBufferPointer { bufferPointer in
+                vDSP_mmov(
+                    startPointer.advanced(by: currentFrame),
+                    bufferPointer.baseAddress!,
+                    vDSP_Length(currentChunkSize),
+                    1,
+                    vDSP_Length(currentChunkSize),
+                    1
+                )
+            }
+
+            result.append(contentsOf: chunk)
+            currentFrame += currentChunkSize
+
+            memset(startPointer.advanced(by: currentFrame - currentChunkSize), 0, currentChunkSize * MemoryLayout<Float>.size)
+        }
+
+        return result
     }
 
     public static func requestRecordPermission() async -> Bool {
@@ -507,7 +695,7 @@ public class AudioProcessor: NSObject, AudioProcessing {
                 &propertySize,
                 &name
             )
-            if status == noErr, let deviceNameCF = name?.takeUnretainedValue() as String? {
+            if status == noErr, let deviceNameCF = name?.takeRetainedValue() as String? {
                 deviceName = deviceNameCF
             }
 
