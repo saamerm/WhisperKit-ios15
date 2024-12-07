@@ -77,7 +77,7 @@ public extension AudioProcessing {
     /// Loads and converts audio data from a specified file paths.
     /// - Parameter audioPaths: The file paths of the audio files.
     /// - Returns: `AVAudioPCMBuffer` containing the audio data.
-    @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+    @available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
     static func loadAudioAsync(fromPath audioFilePath: String) async throws -> AVAudioPCMBuffer {
         return try await Task {
             try AudioProcessor.loadAudio(fromPath: audioFilePath)

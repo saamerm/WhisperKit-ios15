@@ -4,7 +4,7 @@
 import Foundation
 
 /// Voice activity detection based on energy threshold
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 final class EnergyVAD: VoiceActivityDetector {
     var energyThreshold: Float
 

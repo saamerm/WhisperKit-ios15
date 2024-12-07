@@ -235,7 +235,7 @@ public struct ModelSupportConfig: Codable {
         computeDisabledModels()
     }
 
-    @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+    @available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
     public func modelSupport(for deviceIdentifier: String = WhisperKit.deviceName()) -> ModelSupport {
         for support in deviceSupports {
             if support.identifiers.contains(where: { deviceIdentifier.hasPrefix($0) }) {

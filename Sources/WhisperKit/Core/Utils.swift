@@ -449,7 +449,7 @@ func detectVariant(logitsDim: Int, encoderDim: Int) -> ModelVariant {
     return modelVariant
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public func modelSupport(for deviceName: String, from config: ModelSupportConfig? = nil) -> ModelSupport {
     let config = config ?? Constants.fallbackModelSupportConfig
     let modelSupport = config.modelSupport(for: deviceName)
@@ -459,7 +459,7 @@ public func modelSupport(for deviceName: String, from config: ModelSupportConfig
 /// Deprecated
 @available(*, deprecated, message: "Subject to removal in a future version. Use modelSupport(for:from:) -> ModelSupport instead.")
 @_disfavoredOverload
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 public func modelSupport(for deviceName: String, from config: ModelSupportConfig? = nil) -> (default: String, disabled: [String]) {
     let modelSupport: ModelSupport = modelSupport(for: deviceName, from: config)
     return (modelSupport.default, modelSupport.disabled)

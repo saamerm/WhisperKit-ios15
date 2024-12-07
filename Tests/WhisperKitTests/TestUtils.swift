@@ -86,7 +86,7 @@ extension Bundle {
     }
 }
 
-@available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
+@available(macOS 13, iOS 15, watchOS 10, visionOS 1, *)
 extension FileManager {
     func allocatedSizeOfDirectory(at url: URL) throws -> Int64 {
         guard let enumerator = enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]) else {
