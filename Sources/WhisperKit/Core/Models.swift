@@ -1377,6 +1377,63 @@ extension WhisperTokenizerWrapper {
     static var defaultTimeTokenBegin: Int { 50364 }
 }
 
+// Thank you Deepseek for this. Tested and working.
+extension WhisperTokenizerWrapper {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
+    }
+
+    func callAsFunction(_ text: String, addSpecialTokens: Bool) -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return encode(text: text, addSpecialTokens: addSpecialTokens)
+    }
+
+    func convertTokensToIds(_ tokens: [String]) -> [Int?] {
+        // Implement this method based on your tokenizer's logic
+        return tokens.map { tokenizer.convertTokenToId($0) }
+    }
+
+    func convertIdsToTokens(_ ids: [Int]) -> [String?] {
+        // Implement this method based on your tokenizer's logic
+        return ids.map { tokenizer.convertIdToToken($0) }
+    }
+
+    func applyChatTemplate(messages: [[String: String]]) throws -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return try tokenizer.applyChatTemplate(messages: messages)
+    }
+
+    func applyChatTemplate(messages: [[String: String]], chatTemplate: ChatTemplateArgument) throws -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return try tokenizer.applyChatTemplate(messages: messages, chatTemplate: chatTemplate)
+    }
+
+    func applyChatTemplate(messages: [[String: String]], chatTemplate: String) throws -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return try tokenizer.applyChatTemplate(messages: messages, chatTemplate: chatTemplate)
+    }
+
+    func applyChatTemplate(
+        messages: [[String: String]],
+        chatTemplate: ChatTemplateArgument?,
+        addGenerationPrompt: Bool,
+        truncation: Bool,
+        maxLength: Int?,
+        tools: [[String: Any]]?
+    ) throws -> [Int] {
+        // Implement this method based on your tokenizer's logic
+        return try tokenizer.applyChatTemplate(
+            messages: messages,
+            chatTemplate: chatTemplate,
+            addGenerationPrompt: addGenerationPrompt,
+            truncation: truncation,
+            maxLength: maxLength,
+            tools: tools
+        )
+    }
+}
+
 // MARK: Constants
 
 public enum Constants {

@@ -1,6 +1,15 @@
 {
-  "originHash" : "831ad63194a5262b2549d58e383a520f9cbbc80b4a75660fbbcc56d65edfdab4",
+  "originHash" : "78725de602495267df91cafb8ed037ead9a71e9ef451119c8ecc65e7a97c5e8c",
   "pins" : [
+    {
+      "identity" : "jinja",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/maiqingqiang/Jinja",
+      "state" : {
+        "revision" : "6dbe4c449469fb586d0f7339f900f0dd4d78b167",
+        "version" : "1.0.6"
+      }
+    },
     {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
@@ -11,20 +20,11 @@
       }
     },
     {
-      "identity" : "swift-markdown-ui",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/gonzalezreal/swift-markdown-ui.git",
-      "state" : {
-        "revision" : "ae799d015a5374708f7b4c85f3294c05f2a564e2",
-        "version" : "2.3.0"
-      }
-    },
-    {
       "identity" : "swift-transformers-ios15",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/saamerm/swift-transformers-ios15.git",
       "state" : {
-        "revision" : "6a6c404f5cc8d86821e10c53dd89cecdad89514e",
+        "revision" : "de9024dc8c7249b9eddae26bd9fb99f9baaf1d92",
         "version" : "0.2.0"
       }
     }
