@@ -466,9 +466,12 @@ public func modelSupport(for deviceName: String, from config: ModelSupportConfig
 }
 
 public func detectModelURL(inFolder path: URL, named modelName: String) -> URL {
-    let compiledUrl = path.appending(path: "\(modelName).mlmodelc")
-    let packageUrl = path.appending(path: "\(modelName).mlpackage/Data/com.apple.CoreML/model.mlmodel")
-
+    var compiledUrl = path.appendingPathComponent("\(modelName).mlmodelc")
+    var packageUrl = path.appendingPathComponent("\(modelName).mlpackage/Data/com.apple.CoreML/model.mlmodel")
+    if #available(iOS 16.0, *) {
+        compiledUrl = path.appending(path: "\(modelName).mlmodelc")
+        packageUrl = path.appending(path: "\(modelName).mlpackage/Data/com.apple.CoreML/model.mlmodel")
+    }
     let compiledModelExists: Bool = FileManager.default.fileExists(atPath: compiledUrl.path)
     let packageModelExists: Bool = FileManager.default.fileExists(atPath: packageUrl.path)
 
