@@ -2,15 +2,6 @@
   "originHash" : "78725de602495267df91cafb8ed037ead9a71e9ef451119c8ecc65e7a97c5e8c",
   "pins" : [
     {
-      "identity" : "jinja",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/maiqingqiang/Jinja",
-      "state" : {
-        "revision" : "6dbe4c449469fb586d0f7339f900f0dd4d78b167",
-        "version" : "1.0.6"
-      }
-    },
-    {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-argument-parser.git",
